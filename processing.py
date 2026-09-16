@@ -90,12 +90,59 @@ def subtitles(segments, start, end):
     return '\n'.join(cues)
 
 
+def caption_cues(segments):
+    """Texto e quebras compartilhados pela prévia e pelo renderizador ASS."""
+    cues = []
+    for segment in segments:
+        words = segment.get('words') or [segment]
+        for i in range(0, len(words), 6):
+            group = words[i:i + 6]
+            text = ' '.join(w['text'] for w in group)
+            text = ' '.join(text.replace('\\', '').replace('{', '').replace('}', '').split())
+            lines = textwrap.wrap(text, width=26, break_long_words=True, break_on_hyphens=False)
+            # Grupos muito longos são divididos em blocos de no máximo duas linhas.
+            chunks = ['\n'.join(lines[n:n + 2]) for n in range(0, len(lines), 2)]
+            for n, chunk in enumerate(chunks):
+                length = (group[-1]['end'] - group[0]['start']) / len(chunks)
+                cues.append({'start': group[0]['start'] + n * length,
+                             'end': group[0]['start'] + (n + 1) * length, 'text': chunk})
+    return cues
+
+
+def ass_subtitles(segments, start, end):
+    # Coordenadas explícitas evitam a resolução implícita do SRT/libass.
+    header = '''[Script Info]
+ScriptType: v4.00+
+PlayResX: 720
+PlayResY: 1280
+WrapStyle: 2
+ScaledBorderAndShadow: yes
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Arial,48,&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,3,0,2,43,43,205,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+'''
+    def timecode(value):
+        cs = max(0, round(value * 100))
+        return f'{cs // 360000}:{cs // 6000 % 60:02}:{cs // 100 % 60:02}.{cs % 100:02}'
+    events = []
+    for cue in caption_cues(segments):
+        a, b = max(start, cue['start']), min(end, cue['end'])
+        if b > a:
+            text = cue['text'].replace('\n', r'\N')
+            events.append(f'Dialogue: 0,{timecode(a-start)},{timecode(b-start)},Default,,0,0,0,,{text}')
+    return header + '\n'.join(events) + '\n'
+
+
 def export(folder, segments, start, end, captions, export_id):
     filters = framing_filter()
     if captions:
-        name = f'{export_id}.srt'
-        (folder / name).write_text(subtitles(segments, start, end), encoding='utf-8')
-        filters += f",subtitles={name}:force_style='FontName=Arial,FontSize=20,Outline=2,MarginV=65'"
+        name = f'{export_id}.ass'
+        (folder / name).write_text(ass_subtitles(segments, start, end), encoding='utf-8')
+        filters += f',ass={name}'
     output = f'{export_id}.mp4'
     run(['ffmpeg', '-y', '-v', 'error', '-ss', str(start), '-i', 'source.mp4', '-t', str(end-start),
          '-map', '0:v:0', '-map', '0:a:0?', '-vf', filters, '-c:v', 'libx264', '-preset', 'fast',

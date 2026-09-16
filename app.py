@@ -42,7 +42,7 @@ def analyze(key):
         update(key, status='transcribing', message='Transcrevendo o áudio com o modelo local…')
         segments = processing.transcribe(folder / 'source.mp4') if audio else []
         update(key, status='ready', message='Cortes prontos para revisar.' if segments else 'Sem fala detectada. Ajuste seu corte manualmente.',
-               duration=duration, segments=segments, suggestions=processing.suggest(segments, duration))
+               duration=duration, segments=segments, caption_cues=processing.caption_cues(segments), suggestions=processing.suggest(segments, duration))
     except Exception as exc:
         update(key, status='error', message=str(exc))
 
@@ -71,6 +71,8 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith('/api/jobs/'):
             with LOCK:
                 job = dict(JOBS.get(path.split('/')[-1], {}))
+            if 'segments' in job:
+                job['caption_cues'] = processing.caption_cues(job['segments'])
             return self.json(job or {'message': 'Tarefa não encontrada.'}, 200 if job else 404)
         if path.startswith('/media/'):
             parts = path.split('/')
