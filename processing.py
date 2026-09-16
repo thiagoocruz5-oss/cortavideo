@@ -2,7 +2,11 @@
 import json
 import math
 import os
-import subprocess
+import sys
+import uuid
+import shutil
+from contextlib import contextmanager
+from process_runner import run_process
 import textwrap
 import binaries
 from pathlib import Path
@@ -11,10 +15,8 @@ from pathlib import Path
 def run(args, cwd=None):
     if args[0] in ('ffmpeg', 'ffprobe'):
         args = [binaries.require(args[0]), *args[1:]]
-    result = subprocess.run(args, cwd=cwd, capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=7200)
-    if result.returncode:
-        raise RuntimeError(result.stderr[-2500:])
-    return result.stdout
+    return run_process(args, cwd=cwd)
+
 
 
 def probe(path):
@@ -29,20 +31,28 @@ def probe(path):
     return duration, any(s['codec_type'] == 'audio' for s in info['streams'])
 
 
-def transcribe(path):
-    from faster_whisper import WhisperModel
-    # Futuro: cache de modelo e seleção de GPU, conforme a memória disponível.
-    name = os.getenv('WHISPER_MODEL', 'base')
-    local = Path(__file__).resolve().parent / 'models' / name
-    if not (local / '.ready').is_file():
-        raise RuntimeError('Modelo local ausente. Execute preparar_modelo.py antes de transcrever.')
+@contextmanager
+def scratch_directory(parent):
+    # Herda as ACLs no Windows; mkdir(0700) pode excluir o usuário do sandbox.
+    folder = Path(parent) / ('transcribe-' + uuid.uuid4().hex)
+    folder.mkdir(mode=0o777 if os.name == 'nt' else 0o700)
     try:
-        model = WhisperModel(str(local), device='cpu', compute_type='int8', local_files_only=True)
-    except Exception as exc:
-        raise RuntimeError('Não foi possível carregar o modelo de transcrição. Execute preparar_modelo.py com acesso à internet uma vez e tente novamente. O vídeo continua salvo no computador.') from exc
-    segments, _ = model.transcribe(str(path), vad_filter=True, word_timestamps=True)
-    return [{'start': s.start, 'end': s.end, 'text': s.text.strip(),
-             'words': [{'start': w.start, 'end': w.end, 'text': w.word.strip()} for w in (s.words or [])]} for s in segments]
+        yield folder
+    finally:
+        shutil.rmtree(folder)
+
+
+def transcribe(path):
+    path = Path(path).resolve()
+    # FFmpeg termina ANTES do carregamento do modelo, evitando somar os picos.
+    with scratch_directory(path.parent) as scratch:
+        wav = Path(scratch) / 'audio.wav'
+        result = Path(scratch) / 'transcript.json'
+        run(['ffmpeg', '-y', '-v', 'error', '-threads', '1', '-i', str(path),
+             '-vn', '-sn', '-dn', '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', str(wav)])
+        run_process([sys.executable, str(Path(__file__).with_name('transcription_worker.py')),
+                     str(wav), str(result)])
+        return json.loads(result.read_text(encoding='utf-8'))
 
 
 def suggest(segments, duration):
@@ -151,7 +161,16 @@ def export(folder, segments, start, end, captions, export_id, position=0.5):
         (folder / name).write_text(ass_subtitles(segments, start, end), encoding='utf-8')
         filters += f',ass={name}'
     output = f'{export_id}.mp4'
-    run(['ffmpeg', '-y', '-v', 'error', '-ss', str(start), '-i', 'source.mp4', '-t', str(end-start),
-         '-map', '0:v:0', '-map', '0:a:0?', '-vf', filters, '-c:v', 'libx264', '-preset', 'fast',
-         '-crf', '22', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart', output], cwd=folder)
-    return output
+    try:
+        run(['ffmpeg', '-y', '-v', 'error', '-threads', '1', '-filter_threads', '1',
+             '-ss', str(start), '-i', 'source.mp4', '-t', str(end-start),
+             '-map', '0:v:0', '-map', '0:a:0?', '-vf', filters, '-c:v', 'libx264',
+             '-threads', '1', '-preset', 'fast', '-tune', 'zerolatency',
+             '-crf', '22', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k',
+             '-movflags', '+faststart', output], cwd=folder)
+        return output
+    except BaseException:
+        (folder / output).unlink(missing_ok=True)
+        raise
+    finally:
+        (folder / f'{export_id}.ass').unlink(missing_ok=True)

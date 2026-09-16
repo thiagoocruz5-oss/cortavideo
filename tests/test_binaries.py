@@ -22,8 +22,6 @@ class BinaryTests(unittest.TestCase):
             self.assertFalse(binaries.health()['ffmpeg'])
 
     def test_processing_uses_resolved_executable(self):
-        with patch('binaries.require', return_value='C:/Video Tools/ffmpeg.exe'), patch('processing.subprocess.run') as run:
-            run.return_value.returncode = 0
-            run.return_value.stdout = 'ok'
+        with patch('binaries.require', return_value='C:/Video Tools/ffmpeg.exe'), patch('processing.run_process', return_value='ok') as run:
             self.assertEqual(processing.run(['ffmpeg', '-version']), 'ok')
             self.assertEqual(run.call_args.args[0], ['C:/Video Tools/ffmpeg.exe', '-version'])

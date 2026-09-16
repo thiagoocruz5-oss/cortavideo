@@ -3,7 +3,25 @@ let current = null, job = null, exporting = false;
 let activeCut = 0;
 const cutPositions = new Map();
 function status(message, error = false) { $('status').hidden = false; $('status').textContent = message; $('status').className = error ? 'error' : ''; }
-async function request(url, options) { const response = await fetch(url, options); const data = await response.json(); if (!response.ok) throw new Error(data.message || 'Não foi possível concluir.'); return data; }
+async function request(url, options) {
+  let response, body;
+  try {
+    response = await fetch(url, options);
+    body = await response.text();
+  } catch {
+    throw new Error('A conexão com o servidor foi interrompida. Ele pode estar reiniciando. Aguarde e tente novamente.');
+  }
+  let data;
+  try { data = JSON.parse(body); } catch {
+    throw new Error(`O servidor retornou uma resposta vazia ou inválida (HTTP ${response.status}). Ele pode estar reiniciando por falta de memória. Aguarde e tente novamente.`);
+  }
+  if (!data || typeof data !== 'object' || Array.isArray(data)) {
+    throw new Error('Resposta inesperada do servidor. Aguarde e tente novamente.');
+  }
+  if (!response.ok) throw new Error(data.message || `Não foi possível concluir (HTTP ${response.status}).`);
+  return data;
+}
+
 async function poll(id, notify) { for (;;) { const result = await request(`/api/jobs/${id}`); if (result.status === 'error') throw new Error(result.message); if (result.status === 'ready') return result; notify(result.message); await new Promise(r => setTimeout(r, 1800)); } }
 function clock(t) { return `${Math.floor(t / 60).toString().padStart(2, '0')}:${Math.floor(t % 60).toString().padStart(2, '0')}`; }
 function values() { return {start: Number($('start').value), end: Number($('end').value)}; }

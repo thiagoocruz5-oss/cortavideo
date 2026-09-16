@@ -1,6 +1,7 @@
 """Baixe uma vez; o servidor usará a cópia local sem acessar o Hub."""
 import os
 from pathlib import Path
+from runtime_config import model_name
 os.environ.setdefault('HF_HOME', str(Path(__file__).resolve().parent / 'models' / '.cache'))
 ROOT = Path(__file__).resolve().parent
 REQUIRED_FILES = ('config.json', 'model.bin', 'tokenizer.json', 'vocabulary.txt')
@@ -12,7 +13,7 @@ def model_complete(folder):
 
 
 def main():
-    name = os.getenv('WHISPER_MODEL', 'base')
+    name = model_name()
     # Mesma pasta e WHISPER_MODEL utilizados por processing.transcribe.
     folder = ROOT / 'models' / name
     folder.mkdir(parents=True, exist_ok=True)

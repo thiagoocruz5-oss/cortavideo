@@ -12,4 +12,6 @@ services:
       - key: PYTHON_VERSION
         value: 3.12.9
       - key: WHISPER_MODEL
-        value: base
+        value: tiny
+      - key: LOW_MEMORY_MODE
+        value: "1"

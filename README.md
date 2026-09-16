@@ -6,28 +6,34 @@
 
 - **Build Command:** `python -m pip install -r requirements.txt && python preparar_modelo.py`
 - **Start Command:** `python app.py`
-- **WHISPER_MODEL:** `base`, igual no build e na execução.
+- **WHISPER_MODEL:** `tiny`, igual no build e na execução.
+- **LOW_MEMORY_MODE:** `1`. Se o serviço existente ainda tiver `WHISPER_MODEL=base`, altere para `tiny` no painel.
 - **Root Directory:** pasta que contém `app.py` e `preparar_modelo.py` (vazio se estiverem na raiz).
 
 Se seu Build Command já instala FFmpeg/ffprobe, preserve essas etapas e apenas acrescente `&& python preparar_modelo.py` ao final. O Blueprint não instala os executáveis FFmpeg. Adicionar `render.yaml` não reconfigura automaticamente um serviço criado manualmente: ele é usado por serviços gerenciados como Blueprint. Não é necessário criar outro serviço. Em Docker, inclua `RUN python preparar_modelo.py` depois de copiar o projeto e instalar dependências, mantendo `models/` na imagem final.
 
 Faça um novo deploy após enviar os arquivos. O modelo fica no artefato do build, disponível no início da aplicação, sem download durante uploads. Arquivos completos existentes são reutilizados e validados. Download incompleto ou erro de carregamento interrompem o build; `.ready` só é gravado após sucesso. O funcionamento local no Windows continua igual.
 
-### Memória: 512 MB não garantem transcrição
+### Memória no Render gratuito
 
-Preservamos faster-whisper, modelo multilíngue `base`, CPU e `int8`. Um teste real com áudio curto no Windows mediu pico residente de **312,8 MiB** e pico de memória comprometida de **1492,8 MiB**. Essas métricas não são equivalentes ao consumo de um container Linux. Não foi feito teste sob limite real de 512 MB no Render.
+A transcrição continua usando **faster-whisper em CPU/int8**. No Render, o padrão agora é `tiny`; no Windows local, continua `base`. Uma configuração explícita de `WHISPER_MODEL` tem prioridade. O modelo `tiny` consome menos memória, com possível perda de precisão.
 
-A implementação decodifica todo o áudio antes de transcrever: duas horas de mono float32 a 16 kHz representam cerca de **439 MiB só de áudio**, além do modelo, VAD, buffers e servidor. Assim, o limite de duas horas do upload não significa que o plano gratuito suporte esse processamento. Mesmo vídeos curtos podem ultrapassar a memória disponível; nesse caso, o Render pode encerrar o processo. A preparação automática resolve o modelo ausente, não a falta de RAM.
+O upload já era gravado em blocos de 1 MiB. O principal risco identificado estava depois: decodificação do áudio inteiro e modelo carregado no processo permanente do servidor. Duas horas de áudio float32/16 kHz representam cerca de 439 MiB, sem contar modelo e servidor. Sem métricas do deploy anterior, não é possível determinar a etapa exata em que o Render encerrou o serviço.
 
-A fila continua com uma tarefa por vez. Para confiabilidade, meça no Linux com vídeos reais e use uma instância com memória suficiente; processamento do áudio em blocos é uma possível melhoria futura. `tiny` é uma opção explícita de WHISPER_MODEL com menor precisão, mas não foi adotada nem certificada para 512 MB. Não use `small` esperando caber nesse limite.
+Agora:
 
-O plano gratuito suspende serviços ociosos após 15 minutos, pode reiniciá-los e não oferece disco persistente. Uploads, exports e tarefas em memória podem se perder. O modelo incluído no build volta com o artefato; arquivos criados durante a execução não têm essa garantia. O build precisa de acesso ao Hugging Face e consome minutos de build para baixar o modelo.
+- FFmpeg extrai áudio para um arquivo temporário em disco e termina antes de carregar o modelo.
+- Um processo separado transcreve blocos de até 32 segundos, com sobreposição e timestamps globais. Ao terminar, libera a memória do modelo. A divisão pode alterar palavras nas fronteiras dos blocos.
+- Upload/análise/exportação compartilham uma única vaga de processamento; novas operações recebem uma mensagem para tentar depois quando ela está ocupada.
+- FFmpeg usa uma thread por decodificador, filtro e codificador, sem lookahead na exportação. Logs ficam em disco; timeout e encerramento do servidor interrompem os subprocessos.
+- Transcrições ficam em disco. Áudio temporário, legendas intermediárias e exports incompletos são removidos inclusive em falhas tratáveis. Arquivos de entrada e MP4 finais permanecem disponíveis e recebem limpeza por expiração (24 horas por padrão, configurável por `FILE_TTL_HOURS`). Um encerramento forçado pelo sistema pode impedir a limpeza imediata.
+- O navegador trata respostas vazias, inválidas e falhas de conexão com uma mensagem compreensível.
 
-Referências: [limitações gratuitas](https://render.com/docs/free) e [recursos dos planos](https://render.com/docs/compute-plans).
+**Validação:** 45 testes Python e 6 testes JavaScript passaram. Um fluxo real passou por upload, transcrição `tiny`, legendas, enquadramento à direita, exportação 720×1280, HEAD, download parcial e limpeza temporária. Em uma transcrição real de 90 segundos, o processo do modelo teve pico residente de **269 MiB no Windows**. Essa medida não inclui todo o serviço e não certifica consumo abaixo de 512 MB no Linux/Render. Vídeos de resolução muito alta e buffers nativos ainda podem exceder esse limite; confirme o consumo no novo deploy. Use somente uma instância do servidor por serviço.
 
-Validação: **33 testes passaram**, incluindo download simulado, reutilização, arquivos incompletos e falha de validação sem marcador de sucesso. A validação do modelo local e uma transcrição real com timestamps também passaram. O deploy no Render e o limite real de 512 MB ainda não foram testados.
+O disco do Render gratuito é temporário: reinícios podem perder uploads e exports. O modelo preparado no build acompanha o artefato. Referência: [limitações gratuitas do Render](https://render.com/docs/free).
 
-MVP local para transformar um MP4 em cortes verticais de 30 a 60 segundos. Interface em português, transcrição real com faster-whisper, sugestões por densidade de fala e finais de frases, ajuste de intervalo, prévia central, legendas opcionais e exportação com FFmpeg.
+MVP local para transformar um MP4 em cortes verticais de 30 a 60 segundos. Interface em português, transcrição real com faster-whisper, sugestões por densidade de fala e finais de frases, ajuste de intervalo, prévia com enquadramento horizontal, legendas opcionais e exportação com FFmpeg.
 
 ## Como rodar
 
@@ -66,8 +72,8 @@ No macOS/Linux:
 - Legendas são gravadas no MP4, em grupos de até seis palavras. A prévia HTML aproxima a aparência; o FFmpeg renderiza as legendas finais. Revise a transcrição, pois ela pode conter erros.
 - Sem áudio/fala: o app permite um corte manual e desabilita legendas. Sugestões não são uma avaliação de potencial de viralização.
 - Uma tarefa de processamento por vez. A interface informa a etapa, sem estimativa artificial de porcentagem.
-- Arquivos ficam em `data/`. O histórico das tarefas existe apenas em memória: ao reiniciar, reenvie o vídeo. Para liberar espaço, pare o servidor e apague os arquivos dentro de `data/` que não precisar mais.
-- Uso individual local: o servidor escuta apenas em `127.0.0.1`. Não exponha esta versão diretamente à internet.
+- Arquivos ficam em `data/`, com limpeza automática por expiração. O histórico das tarefas existe apenas em memória e expira após 24 horas por padrão: ao reiniciar ou expirar, reenvie o vídeo.
+- Sem `PORT`, o servidor escuta em `127.0.0.1`. No Render, usa `PORT` e `0.0.0.0`. A proteção de origem não substitui autenticação; o MVP não possui contas de usuário.
 
 ## Verificação e problemas comuns
 
@@ -100,6 +106,7 @@ ffmpeg -version
 ffprobe -version
 ffmpeg -filters
 python -m unittest discover -s tests -v
+node tests/test_client.cjs
 ```
 
 Na lista de filtros, confira `subtitles`. Se faltar, instale uma distribuição do FFmpeg com libass. Se o navegador não reproduzir o MP4 original, ele pode usar um codec não suportado pelo navegador; tente a exportação, que converte para H.264. Erros de download do Whisper normalmente pedem verificar internet, proxy ou espaço em disco. Para encerrar o servidor, pressione Ctrl+C.
@@ -107,10 +114,13 @@ Na lista de filtros, confira `subtitles`. Se faltar, instale uma distribuição 
 ## Organização e próximas melhorias
 
 - `app.py`: servidor, upload em blocos, fila e download com suporte a intervalos.
-- `processing.py`: transcrição, sugestões, legendas e FFmpeg sem comandos de shell.
+- `processing.py`: coordenação da transcrição, sugestões, legendas e FFmpeg.
+- `transcription_worker.py`: modelo isolado e áudio em blocos.
+- `process_runner.py`: subprocessos, logs em disco e timeout.
+- `runtime_config.py`: seleção consistente do modelo no build e na execução.
 - `static/`: interface responsiva sem dependências de frontend.
 - `processing.framing_filter()` isola o enquadramento. Futuro: estratégia com detecção/rastreamento de rosto e suavização da posição ao longo do tempo.
-- Futuro: seleção semântica de melhores momentos; edição do texto das legendas; cancelamento de tarefas; progresso por frames; histórico persistente; limpeza automática de arquivos; fila com limites e autenticação antes de hospedagem pública.
+- Futuro: seleção semântica de melhores momentos; edição do texto das legendas; cancelamento de tarefas; progresso por frames; histórico persistente; autenticação e cotas por usuário.
 
 Referências: [faster-whisper](https://github.com/SYSTRAN/faster-whisper) e [filtros FFmpeg](https://ffmpeg.org/ffmpeg-filters.html).
 

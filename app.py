@@ -11,10 +11,31 @@ import uuid
 import processing
 import socket
 import os
+import shutil
+import time
+import signal
+from process_runner import stop_all
 
 
 class LocalServer(ThreadingHTTPServer):
     allow_reuse_address = False
+    request_slots = threading.BoundedSemaphore(8)
+
+    def process_request(self, request, client_address):
+        if not self.request_slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self.request_slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self.request_slots.release()
 
     def server_bind(self):
         if hasattr(socket, 'SO_EXCLUSIVEADDRUSE'):
@@ -27,6 +48,7 @@ DATA.mkdir(exist_ok=True)
 JOBS = {}
 LOCK = threading.Lock()
 POOL = ThreadPoolExecutor(max_workers=1)
+HEAVY_SLOT = threading.BoundedSemaphore(1)
 MAX_UPLOAD = 1024 * 1024 * 1024
 
 
@@ -60,24 +82,67 @@ def update(key, **values):
         JOBS[key].update(values)
 
 
+def load_segments(key):
+    # Compatibilidade com testes/clientes internos; resultados reais ficam no disco.
+    if 'segments' in JOBS.get(key, {}):
+        return JOBS[key]['segments']
+    return json.loads((DATA / key / 'transcript.json').read_text(encoding='utf-8'))
+
+
 def analyze(key):
+    folder = DATA / key
     try:
-        folder = DATA / key
         duration, audio = processing.probe(folder / 'source.mp4')
-        update(key, status='transcribing', message='Transcrevendo o áudio com o modelo local…')
+        update(key, status='transcribing', message='Transcrevendo em blocos com o modelo local…')
         segments = processing.transcribe(folder / 'source.mp4') if audio else []
+        (folder / 'transcript.json').write_text(json.dumps(segments), encoding='utf-8')
         update(key, status='ready', message='Cortes prontos para revisar.' if segments else 'Sem fala detectada. Ajuste seu corte manualmente.',
-               duration=duration, segments=segments, caption_cues=processing.caption_cues(segments), suggestions=processing.suggest(segments, duration))
+               duration=duration, suggestions=processing.suggest(segments, duration))
     except Exception as exc:
         update(key, status='error', message=str(exc))
+        shutil.rmtree(folder, ignore_errors=True)
 
 
 def render(key, parent, start, end, captions, position=0.5):
     try:
-        name = processing.export(DATA / parent, JOBS[parent]['segments'], start, end, captions, key, position)
+        name = processing.export(DATA / parent, load_segments(parent) if captions else [], start, end, captions, key, position)
         update(key, status='ready', url=f'/media/{parent}/{name}')
     except Exception as exc:
         update(key, status='error', message=str(exc))
+
+
+def guarded_task(function, *args):
+    try:
+        function(*args)
+    finally:
+        HEAVY_SLOT.release()
+
+
+def cleanup_expired():
+    # Só remove pastas UUID criadas pelo aplicativo, nunca caminhos enviados pelo cliente.
+    if not HEAVY_SLOT.acquire(blocking=False):
+        return
+    try:
+        cutoff = time.time() - int(os.getenv('FILE_TTL_HOURS', '24')) * 3600
+        for folder in DATA.iterdir():
+            if folder.is_dir() and not folder.is_symlink() and len(folder.name) == 32 and all(c in '0123456789abcdef' for c in folder.name):
+                if folder.stat().st_mtime < cutoff:
+                    shutil.rmtree(folder, ignore_errors=True)
+        with LOCK:
+            for key, job in list(JOBS.items()):
+                if job.get('created', time.time()) < cutoff and job.get('status') in ('ready', 'error'):
+                    JOBS.pop(key, None)
+    finally:
+        HEAVY_SLOT.release()
+
+
+def janitor():
+    while True:
+        try:
+            cleanup_expired()
+        except OSError:
+            pass
+        time.sleep(60)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -100,8 +165,14 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith('/api/jobs/'):
             with LOCK:
                 job = dict(JOBS.get(path.split('/')[-1], {}))
-            if 'segments' in job:
-                job['caption_cues'] = processing.caption_cues(job['segments'])
+            if job.get('status') == 'ready' and 'duration' in job:
+                key = path.split('/')[-1]
+                try:
+                    job['segments'] = load_segments(key)
+                    job['caption_cues'] = processing.caption_cues(job['segments'])
+                    os.utime(DATA / key, None)
+                except OSError:
+                    return self.json({'message': 'Vídeo expirado. Envie novamente.'}, 410)
             return self.json(job or {'message': 'Tarefa não encontrada.'}, 200 if job else 404)
         if path.startswith('/media/'):
             parts = path.split('/')
@@ -162,6 +233,8 @@ class Handler(BaseHTTPRequestHandler):
         origin = self.headers.get('Origin')
         if not origin_allowed(origin, self.headers.get('Host', '')):
             return self.json({'message': 'Origem não permitida.'}, 403)
+        owns_slot = False
+        upload_folder = None
         try:
             length = int(self.headers.get('Content-Length', '0'))
             if self.path == '/api/upload':
@@ -170,8 +243,12 @@ class Handler(BaseHTTPRequestHandler):
                 missing = [name for name, available in binaries.health().items() if not available]
                 if missing:
                     return self.json({'message': 'Não foi possível localizar: ' + ', '.join(missing) + '. Configure o caminho conforme o README.'}, 503)
+                if not HEAVY_SLOT.acquire(blocking=False):
+                    return self.json({'message': 'Outro vídeo está sendo processado. Aguarde e tente novamente.'}, 429)
+                owns_slot = True
                 key = uuid.uuid4().hex
                 folder = DATA / key
+                upload_folder = folder
                 folder.mkdir()
                 self.connection.settimeout(120)
                 with (folder / 'source.mp4').open('wb') as f:
@@ -183,8 +260,10 @@ class Handler(BaseHTTPRequestHandler):
                         f.write(chunk)
                         remaining -= len(chunk)
                 with LOCK:
-                    JOBS[key] = {'status': 'queued', 'message': 'Vídeo recebido. Aguardando análise…'}
-                POOL.submit(analyze, key)
+                    JOBS[key] = {'created': time.time(), 'status': 'queued', 'message': 'Vídeo recebido. Aguardando análise…'}
+                POOL.submit(guarded_task, analyze, key)
+                owns_slot = False
+                upload_folder = None
                 return self.json({'id': key}, 202)
             if self.path == '/api/export':
                 if not 0 < length < 4096:
@@ -200,16 +279,26 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError('Enquadramento deve estar entre 0 e 1.')
                 if not all(map(math.isfinite, [start, end])) or not 0 <= start < end <= job['duration'] or not 30 <= end-start <= 60:
                     raise ValueError('Escolha um trecho de 30 a 60 segundos dentro do vídeo.')
+                if not HEAVY_SLOT.acquire(blocking=False):
+                    return self.json({'message': 'Outro vídeo está sendo processado. Aguarde e tente novamente.'}, 429)
+                owns_slot = True
+                os.utime(DATA / parent, None)
                 key = uuid.uuid4().hex
                 with LOCK:
-                    JOBS[key] = {'status': 'rendering', 'message': 'Exportando seu corte…'}
-                POOL.submit(render, key, parent, start, end, data.get('captions') is True, position)
+                    JOBS[key] = {'created': time.time(), 'status': 'rendering', 'message': 'Exportando seu corte…'}
+                POOL.submit(guarded_task, render, key, parent, start, end, data.get('captions') is True, position)
+                owns_slot = False
                 return self.json({'id': key}, 202)
             self.json({'message': 'Rota não encontrada.'}, 404)
         except (ValueError, KeyError, TypeError) as exc:
             self.json({'message': str(exc)}, 400)
         except Exception:
             self.json({'message': 'Não foi possível concluir. Confira o terminal e tente novamente.'}, 500)
+        finally:
+            if upload_folder is not None:
+                shutil.rmtree(upload_folder, ignore_errors=True)
+            if owns_slot:
+                HEAVY_SLOT.release()
 
 
 def server_address():
@@ -226,4 +315,13 @@ if __name__ == '__main__':
     host, port = server_address()
     server = LocalServer((host, port), Handler)
     print(f'CortaVideo: http://{host}:{port}', flush=True)
-    server.serve_forever()
+    def terminate(signum, frame):
+        stop_all()
+        raise SystemExit(0)
+    signal.signal(signal.SIGTERM, terminate)
+    threading.Thread(target=janitor, daemon=True).start()
+    try:
+        server.serve_forever()
+    finally:
+        stop_all()
+        server.server_close()
