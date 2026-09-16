@@ -30,6 +30,31 @@ POOL = ThreadPoolExecutor(max_workers=1)
 MAX_UPLOAD = 1024 * 1024 * 1024
 
 
+def origin_allowed(origin, host):
+    """Lista explícita; não confia em Host/Forwarded para liberar domínios."""
+    # Clientes locais sem Origin (scripts/CLI) mantêm o comportamento existente.
+    if origin is None:
+        return True
+    if origin == 'https://cortavideo.onrender.com':
+        return True
+    try:
+        source = urlparse(origin)
+        target = urlparse('http://' + host)
+        loopback = {'127.0.0.1', 'localhost'}
+        return (
+            source.scheme == 'http'
+            and source.hostname in loopback and target.hostname in loopback
+            and source.username is None and source.password is None
+            and target.username is None and target.password is None
+            and not any((source.path, source.params, source.query, source.fragment,
+                         target.path, target.params, target.query, target.fragment))
+            and (source.port or 80) == (target.port or 80)
+            and origin == f'http://{source.netloc}'
+        )
+    except (ValueError, TypeError):
+        return False
+
+
 def update(key, **values):
     with LOCK:
         JOBS[key].update(values)
@@ -129,7 +154,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         # Evita requisições de outras páginas para o servidor local.
         origin = self.headers.get('Origin')
-        if origin and origin != 'http://' + self.headers.get('Host', ''):
+        if not origin_allowed(origin, self.headers.get('Host', '')):
             return self.json({'message': 'Origem não permitida.'}, 403)
         try:
             length = int(self.headers.get('Content-Length', '0'))

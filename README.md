@@ -98,4 +98,8 @@ Validação: 15 exportações reais (esquerda/centro/direita em paisagem, quadra
 
 Inicie com `python app.py`. Quando `PORT` estiver definida, ela tem prioridade e o servidor escuta em `0.0.0.0`, conforme exigido pelo Render. Sem `PORT`, continua em `127.0.0.1:8001`; `CORTAVIDEO_PORT` permite escolher outra porta local.
 
-Esta alteração configura apenas a porta e o endereço de escuta; não constitui validação de deploy no Render. FFmpeg, modelo local, armazenamento e tratamento de origem HTTPS atrás do proxy ainda precisam ser configurados/validados para hospedagem.
+Esta alteração configura apenas a porta e o endereço de escuta; não constitui validação de deploy no Render. FFmpeg, modelo local, armazenamento ainda precisam ser configurados/validados para hospedagem.
+
+### Proteção de origem
+
+POSTs com `Origin` aceitam explicitamente `https://cortavideo.onrender.com`. Acesso HTTP local permite `127.0.0.1` e `localhost` quando o Host também é local e a porta coincide. Outros domínios, origem `null`, sufixos parecidos e portas diferentes são bloqueados. Cabeçalhos `X-Forwarded-*` não ampliam essa permissão. Clientes sem Origin mantêm a compatibilidade anterior; essa verificação não substitui autenticação.
