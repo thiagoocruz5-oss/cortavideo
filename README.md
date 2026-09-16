@@ -1,5 +1,32 @@
 # CortaVídeo
 
+## Render: modelo preparado automaticamente no build
+
+`render.yaml` configura a instalação e a preparação automática do modelo. Para o serviço **já existente**, configure uma vez no painel:
+
+- **Build Command:** `python -m pip install -r requirements.txt && python preparar_modelo.py`
+- **Start Command:** `python app.py`
+- **WHISPER_MODEL:** `base`, igual no build e na execução.
+- **Root Directory:** pasta que contém `app.py` e `preparar_modelo.py` (vazio se estiverem na raiz).
+
+Se seu Build Command já instala FFmpeg/ffprobe, preserve essas etapas e apenas acrescente `&& python preparar_modelo.py` ao final. O Blueprint não instala os executáveis FFmpeg. Adicionar `render.yaml` não reconfigura automaticamente um serviço criado manualmente: ele é usado por serviços gerenciados como Blueprint. Não é necessário criar outro serviço. Em Docker, inclua `RUN python preparar_modelo.py` depois de copiar o projeto e instalar dependências, mantendo `models/` na imagem final.
+
+Faça um novo deploy após enviar os arquivos. O modelo fica no artefato do build, disponível no início da aplicação, sem download durante uploads. Arquivos completos existentes são reutilizados e validados. Download incompleto ou erro de carregamento interrompem o build; `.ready` só é gravado após sucesso. O funcionamento local no Windows continua igual.
+
+### Memória: 512 MB não garantem transcrição
+
+Preservamos faster-whisper, modelo multilíngue `base`, CPU e `int8`. Um teste real com áudio curto no Windows mediu pico residente de **312,8 MiB** e pico de memória comprometida de **1492,8 MiB**. Essas métricas não são equivalentes ao consumo de um container Linux. Não foi feito teste sob limite real de 512 MB no Render.
+
+A implementação decodifica todo o áudio antes de transcrever: duas horas de mono float32 a 16 kHz representam cerca de **439 MiB só de áudio**, além do modelo, VAD, buffers e servidor. Assim, o limite de duas horas do upload não significa que o plano gratuito suporte esse processamento. Mesmo vídeos curtos podem ultrapassar a memória disponível; nesse caso, o Render pode encerrar o processo. A preparação automática resolve o modelo ausente, não a falta de RAM.
+
+A fila continua com uma tarefa por vez. Para confiabilidade, meça no Linux com vídeos reais e use uma instância com memória suficiente; processamento do áudio em blocos é uma possível melhoria futura. `tiny` é uma opção explícita de WHISPER_MODEL com menor precisão, mas não foi adotada nem certificada para 512 MB. Não use `small` esperando caber nesse limite.
+
+O plano gratuito suspende serviços ociosos após 15 minutos, pode reiniciá-los e não oferece disco persistente. Uploads, exports e tarefas em memória podem se perder. O modelo incluído no build volta com o artefato; arquivos criados durante a execução não têm essa garantia. O build precisa de acesso ao Hugging Face e consome minutos de build para baixar o modelo.
+
+Referências: [limitações gratuitas](https://render.com/docs/free) e [recursos dos planos](https://render.com/docs/compute-plans).
+
+Validação: **33 testes passaram**, incluindo download simulado, reutilização, arquivos incompletos e falha de validação sem marcador de sucesso. A validação do modelo local e uma transcrição real com timestamps também passaram. O deploy no Render e o limite real de 512 MB ainda não foram testados.
+
 MVP local para transformar um MP4 em cortes verticais de 30 a 60 segundos. Interface em português, transcrição real com faster-whisper, sugestões por densidade de fala e finais de frases, ajuste de intervalo, prévia central, legendas opcionais e exportação com FFmpeg.
 
 ## Como rodar
