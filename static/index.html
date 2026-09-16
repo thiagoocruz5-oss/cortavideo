@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="Transforme seus vídeos em cortes verticais com legendas.">
+  <title>CortaVídeo — seu próximo corte</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23c8ff62'/%3E%3Cpath d='m12 8 13 8-13 8z' fill='%23131711'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script>
+</head>
+<body>
+  <header><a class="brand" href="/"><span class="logo">▶</span>CortaVídeo<span class="tag">BETA</span></a><span class="local"><i></i> Seu estúdio local</span></header>
+  <main>
+    <div class="heading"><div><p class="eyebrow">DO VÍDEO LONGO AO PRÓXIMO PLAY</p><h1>Boas histórias.<br><span>Cortes certeiros.</span></h1></div><p class="intro">Encontre seus melhores trechos.<br>Ajuste, legende e publique em vertical.</p></div>
+    <ol class="steps"><li class="active" id="step1"><b>01</b> Envie seu vídeo</li><li id="step2"><b>02</b> Escolha um corte</li><li id="step3"><b>03</b> Exporte e compartilhe</li></ol>
+    <section id="uploadSection" class="upload-grid">
+      <label id="drop" class="drop" for="file"><span class="upload-icon">↥</span><h2>Seu próximo corte começa aqui</h2><p>Arraste um vídeo ou escolha um arquivo</p><span class="button">Selecionar vídeo <span>＋</span></span><small>MP4 · até 1 GB · de 30 segundos a 2 horas</small><input id="file" type="file" accept=".mp4,video/mp4"></label>
+      <aside class="format-card"><div class="phone"><span class="phone-top">SEU CONTEÚDO</span><div class="art"><i></i><i></i><i></i><span>▶</span></div><strong>Uma boa ideia.<br>Um novo formato.</strong><span class="phone-bottom">9:16 &nbsp; / &nbsp; 720 × 1280</span></div><p>Pronto para o próximo feed</p><div class="platforms"><span>Shorts</span><span>Reels</span><span>TikTok</span></div></aside>
+    </section>
+    <div id="status" role="status" aria-live="polite" hidden></div>
+    <section id="editor" hidden>
+      <div class="editor-heading"><div><p class="eyebrow">SUA MESA DE EDIÇÃO</p><h2>Encontre o trecho certo</h2></div><button id="newVideo" class="secondary">＋ Novo vídeo</button></div>
+      <div class="editor-grid"><div><div class="section-title"><h3>Sugestões de cortes</h3><span id="count"></span></div><p class="hint">Sugestões por ritmo de fala. Revise antes de exportar.</p><div id="suggestions"></div><details><summary>Ver transcrição completa</summary><p id="transcript"></p></details></div>
+      <div class="preview-panel"><div class="preview"><video id="video" playsinline preload="metadata"></video><div id="caption" class="caption"></div></div><button id="play" class="secondary">▶ Reproduzir trecho</button><p class="hint center">Prévia com enquadramento central · 9:16</p></div>
+      <div class="settings"><p class="eyebrow">AJUSTES DO CORTE</p><h3>Do seu jeito.</h3><div class="times"><label>Início (segundos)<input id="start" type="number" min="0" step="0.01"></label><label>Fim (segundos)<input id="end" type="number" min="0" step="0.01"></label></div><p id="duration" class="hint"></p><hr><label class="toggle"><span>Legendas automáticas<small>Gravadas no vídeo exportado</small></span><input id="captions" type="checkbox" checked></label><div class="export-info"><span>Formato<strong>MP4 · 9:16</strong></span><span>Resolução<strong>720 × 1280</strong></span></div><button id="export" class="button">Exportar corte <span>↗</span></button><a id="download" class="button download" hidden download="cortavideo.mp4">↓ Baixar MP4</a><p class="hint">Compatível com Shorts, Reels e TikTok.</p></div></div>
+    </section>
+    <footer><span>Menos edição. Mais criação.</span><span>Seus vídeos ficam neste computador.</span></footer>
+  </main>
+</body></html>
