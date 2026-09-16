@@ -181,8 +181,18 @@ class Handler(BaseHTTPRequestHandler):
             self.json({'message': 'Não foi possível concluir. Confira o terminal e tente novamente.'}, 500)
 
 
+def server_address():
+    # Render fornece PORT e precisa de bind em todas as interfaces.
+    # Sem PORT, preserva o acesso somente local e CORTAVIDEO_PORT.
+    platform_port = os.getenv('PORT')
+    port = int(platform_port or os.getenv('CORTAVIDEO_PORT', '8001'))
+    if not 1 <= port <= 65535:
+        raise ValueError('A porta deve estar entre 1 e 65535.')
+    return ('0.0.0.0' if platform_port else '127.0.0.1', port)
+
+
 if __name__ == '__main__':
-    port = int(os.getenv('CORTAVIDEO_PORT', '8001'))
-    server = LocalServer(('127.0.0.1', port), Handler)
-    print(f'CortaVideo: http://127.0.0.1:{port}', flush=True)
+    host, port = server_address()
+    server = LocalServer((host, port), Handler)
+    print(f'CortaVideo: http://{host}:{port}', flush=True)
     server.serve_forever()

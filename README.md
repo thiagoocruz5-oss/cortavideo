@@ -93,3 +93,9 @@ Referências: [faster-whisper](https://github.com/SYSTRAN/faster-whisper) e [fil
 Prévia: `object-fit: cover` e `object-position: p% 50%`. Exportação: escala pela proporção de exibição (`dar`), recorta em `x = round((largura escalada - 720) × p)` e centraliza verticalmente. A API aceita `position` de 0 a 1; ausência mantém 0,5. Valores fora do intervalo e não finitos são rejeitados. Legendas são aplicadas depois do recorte. Diferenças subpixel de rasterização e compressão entre navegador e H.264 são normais; o campo visual usa a mesma geometria.
 
 Validação: 15 exportações reais (esquerda/centro/direita em paisagem, quadrado, 9:16, estreito e pixels não quadrados), comparadas com a geometria independente de `cover`; exportação adicional com legenda. Controle e exportação verificados também na interface.
+
+## Porta local e Render
+
+Inicie com `python app.py`. Quando `PORT` estiver definida, ela tem prioridade e o servidor escuta em `0.0.0.0`, conforme exigido pelo Render. Sem `PORT`, continua em `127.0.0.1:8001`; `CORTAVIDEO_PORT` permite escolher outra porta local.
+
+Esta alteração configura apenas a porta e o endereço de escuta; não constitui validação de deploy no Render. FFmpeg, modelo local, armazenamento e tratamento de origem HTTPS atrás do proxy ainda precisam ser configurados/validados para hospedagem.
