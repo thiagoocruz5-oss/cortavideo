@@ -87,7 +87,11 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header('Content-Type', 'application/json; charset=utf-8')
         self.send_header('Content-Length', str(len(payload)))
         self.end_headers()
-        self.wfile.write(payload)
+        if self.command != 'HEAD':
+            self.wfile.write(payload)
+
+    def do_HEAD(self):
+        self.do_GET()
 
     def do_GET(self):
         path = urlparse(self.path).path
@@ -118,7 +122,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_error(404)
         size = path.stat().st_size
         start, end = 0, size-1
-        partial = self.headers.get('Range')
+        partial = self.headers.get('Range') if self.command != 'HEAD' else None
         if partial:
             try:
                 a, b = partial.removeprefix('bytes=').split('-')
@@ -138,6 +142,8 @@ class Handler(BaseHTTPRequestHandler):
         if partial:
             self.send_header('Content-Range', f'bytes {start}-{end}/{size}')
         self.end_headers()
+        if self.command == 'HEAD':
+            return
         try:
             with path.open('rb') as f:
                 f.seek(start)

@@ -1,5 +1,6 @@
 import json
 import threading
+import socket
 import unittest
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
@@ -22,6 +23,36 @@ class ApiTests(unittest.TestCase):
     def test_home(self):
         with urlopen(self.base) as response:
             self.assertIn('CortaVídeo', response.read().decode())
+
+    def test_head_matches_get_headers_without_body(self):
+        for route in ['/', '/app.js', '/style.css', '/api/health', '/api/jobs/missing', '/missing']:
+            with self.subTest(route=route):
+                try:
+                    get = urlopen(self.base + route)
+                except HTTPError as error:
+                    get = error
+                with get:
+                    status = get.code
+                    content_type = get.headers['Content-Type']
+                    content_length = get.headers['Content-Length']
+                    self.assertTrue(get.read())
+                # Lê os bytes reais: HTTPResponse.read() ocultaria um corpo HEAD indevido.
+                with socket.create_connection(('127.0.0.1', self.server.server_port), timeout=5) as connection:
+                    connection.sendall(f'HEAD {route} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n'.encode())
+                    response = b''
+                    while chunk := connection.recv(65536):
+                        response += chunk
+                headers, body = response.split(b'\r\n\r\n', 1)
+                self.assertEqual(body, b'')
+                self.assertEqual(int(headers.split(b' ')[1]), status)
+                self.assertIn(f'Content-Type: {content_type}'.encode(), headers)
+                self.assertIn(f'Content-Length: {content_length}'.encode(), headers)
+
+    def test_head_ignores_range(self):
+        with urlopen(Request(self.base + '/app.js', method='HEAD', headers={'Range': 'bytes=0-9'})) as response:
+            self.assertEqual(response.status, 200)
+            self.assertIsNone(response.headers.get('Content-Range'))
+            self.assertEqual(response.read(), b'')
 
     def test_unknown_job(self):
         with self.assertRaises(HTTPError) as error:
