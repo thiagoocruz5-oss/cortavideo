@@ -47,9 +47,9 @@ def analyze(key):
         update(key, status='error', message=str(exc))
 
 
-def render(key, parent, start, end, captions):
+def render(key, parent, start, end, captions, position=0.5):
     try:
-        name = processing.export(DATA / parent, JOBS[parent]['segments'], start, end, captions, key)
+        name = processing.export(DATA / parent, JOBS[parent]['segments'], start, end, captions, key, position)
         update(key, status='ready', url=f'/media/{parent}/{name}')
     except Exception as exc:
         update(key, status='error', message=str(exc))
@@ -164,12 +164,15 @@ class Handler(BaseHTTPRequestHandler):
                 if job.get('status') != 'ready' or 'duration' not in job:
                     raise ValueError('A análise ainda não está pronta.')
                 start, end = float(data['start']), float(data['end'])
+                position = float(data.get('position', 0.5))
+                if not math.isfinite(position) or not 0 <= position <= 1:
+                    raise ValueError('Enquadramento deve estar entre 0 e 1.')
                 if not all(map(math.isfinite, [start, end])) or not 0 <= start < end <= job['duration'] or not 30 <= end-start <= 60:
                     raise ValueError('Escolha um trecho de 30 a 60 segundos dentro do vídeo.')
                 key = uuid.uuid4().hex
                 with LOCK:
                     JOBS[key] = {'status': 'rendering', 'message': 'Exportando seu corte…'}
-                POOL.submit(render, key, parent, start, end, data.get('captions') is True)
+                POOL.submit(render, key, parent, start, end, data.get('captions') is True, position)
                 return self.json({'id': key}, 202)
             self.json({'message': 'Rota não encontrada.'}, 404)
         except (ValueError, KeyError, TypeError) as exc:

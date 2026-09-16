@@ -67,9 +67,16 @@ def suggest(segments, duration):
     return sorted(chosen, key=lambda c: c['start'])
 
 
-def framing_filter():
+def framing_filter(position=0.5):
     # Futuro: receber uma estratégia de enquadramento com coordenadas de rostos.
-    return 'scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,setsar=1'
+    position = float(position)
+    if not math.isfinite(position) or not 0 <= position <= 1:
+        raise ValueError('Enquadramento deve estar entre 0 e 1.')
+    # Equivalente a object-fit: cover + object-position: p% 50%.
+    # dar considera pixels não quadrados; o resultado usa pixels quadrados.
+    # exact=1 evita que o crop arredonde x para múltiplos de 2 (chroma 4:2:0).
+    return ("scale=w='ceil(max(720,1280*dar))':h='ceil(max(1280,720/dar))',setsar=1,"
+            f'crop=720:1280:x=round((iw-ow)*{position}):y=round((ih-oh)/2):exact=1')
 
 
 def stamp(seconds):
@@ -137,8 +144,8 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     return header + '\n'.join(events) + '\n'
 
 
-def export(folder, segments, start, end, captions, export_id):
-    filters = framing_filter()
+def export(folder, segments, start, end, captions, export_id, position=0.5):
+    filters = framing_filter(position)
     if captions:
         name = f'{export_id}.ass'
         (folder / name).write_text(ass_subtitles(segments, start, end), encoding='utf-8')
