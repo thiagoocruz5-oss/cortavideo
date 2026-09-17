@@ -44,7 +44,7 @@ def stop_all():
 atexit.register(stop_all)
 
 
-def run_process(args, cwd=None, timeout=7200, on_tick=None):
+def run_process(args, cwd=None, timeout=7200, on_tick=None, on_stderr=None):
     # Logs em disco. Sessão própria permite encerrar também filhos (ex.: Node do yt-dlp).
     with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
         process = subprocess.Popen(args, cwd=cwd, stdout=stdout, stderr=stderr,
@@ -82,3 +82,8 @@ def run_process(args, cwd=None, timeout=7200, on_tick=None):
                 kill_process(process)
             with LOCK:
                 ACTIVE.discard(process)
+            if on_stderr is not None:
+                # Repassa todo o diagnóstico em blocos limitados, nunca o log inteiro na RAM.
+                stderr.seek(0)
+                while chunk := stderr.readline(8192):
+                    on_stderr(chunk.decode('utf-8', errors='replace').rstrip())

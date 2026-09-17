@@ -67,6 +67,47 @@ class YoutubeValidationTests(unittest.TestCase):
                              (OSError(28,'No space left on device'),'espaço'),(RuntimeError('other'),'yt-dlp')]:
             self.assertIn(fragment,worker.friendly_error(exc))
 
+    def test_render_errors_are_actionable(self):
+        for exc, fragment in [(ModuleNotFoundError('yt_dlp'), 'Build Command'),
+                              (RuntimeError('certificate verify failed'), 'certificados'),
+                              (RuntimeError('Connection reset by peer'), 'interrompida'),
+                              (RuntimeError('Unable to download: HTTP Error 403'), 'não permitiu')]:
+            self.assertIn(fragment, worker.friendly_error(exc))
+
+    def test_bot_block_is_distinct_from_unspecific_403(self):
+        self.assertIn('bloqueou ou limitou', worker.friendly_error(RuntimeError("Sign in to confirm you’re not a bot")))
+        self.assertIn('HTTP 403', worker.friendly_error(RuntimeError('HTTP Error 403')))
+
+    def test_full_stderr_survives_worker_failure_without_tail_truncation(self):
+        import sys
+        from process_runner import run_process
+        lines = []
+        with self.assertRaises(RuntimeError):
+            run_process([sys.executable, '-c', 'import sys; print("FIRST", file=sys.stderr); print("x"*12000, file=sys.stderr); print("LAST", file=sys.stderr); sys.exit(1)'], on_stderr=lines.append)
+        self.assertEqual(lines[0], 'FIRST')
+        self.assertEqual(lines[-1], 'LAST')
+        self.assertEqual(sum(line.count('x') for line in lines), 12000)
+        self.assertLessEqual(max(map(len, lines)), 8192)
+
+    def test_logger_preserves_traceback_lines_and_redacts_secrets(self):
+        log = io.StringIO()
+        with patch('sys.stderr', log):
+            worker.ServerLogger().error('Traceback:\nHTTP 403 https://example.com/?secret=abc\nCookie: secret\nlast line')
+        self.assertIn('Traceback:', log.getvalue())
+        self.assertIn('last line', log.getvalue())
+        self.assertNotIn('secret', log.getvalue())
+
+    def test_diagnostics_hide_signed_urls_credentials_and_bound_size(self):
+        detail = worker.safe_diagnostic(RuntimeError('HTTP 403 https://rr.googlevideo.com/video?secret=abc\nCookie: private\nAuthorization: bearer secret\n' + 'x'*3000))
+        self.assertIn('HTTP 403', detail)
+        self.assertNotIn('secret', detail)
+        self.assertNotIn('private', detail)
+        self.assertLess(len(detail), 1850)
+
+    def test_screenshot_url_preserves_video_and_removes_timestamp(self):
+        self.assertEqual(importer.canonical_url('https://www.youtube.com/watch?v=LN4dE1W9X0U&t=28s'),
+                         'https://www.youtube.com/watch?v=LN4dE1W9X0U')
+
 
 class YoutubePipelineTests(unittest.TestCase):
     def test_actual_ytdlp_pipeline_reuses_metadata_downloads_each_track_once(self):

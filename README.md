@@ -245,3 +245,13 @@ A suíte usa mocks/fixtures para não depender do YouTube: URLs e domínios, met
 Também foi realizado um download real independente: vídeo público de 635 segundos, H.264 1080p com AAC, cerca de 268 MB, importado e montado em 41,1 segundos no Windows. Esse teste verificou mídia completa com áudio; não mede a duração da transcrição nem prevê a velocidade no Render. Os arquivos desse teste foram removidos.
 
 Resultado final desta versão: **78 testes Python e 24 JavaScript passaram**, com os testes reais de FFmpeg habilitados.
+
+### Diagnóstico de importação no Render
+
+O build imprime as versões de yt-dlp, EJS e Node. Cada importação registra no servidor os avisos e o diagnóstico detalhado do yt-dlp, formatos selecionados e traceback em caso de falha. Os registros do subprocesso ficam em disco durante a operação e são repassados ao log do servidor ao terminar, inclusive quando falha, em blocos de até 8 KiB. URLs assinadas e credenciais são ocultadas; o diagnóstico técnico não é enviado à interface.
+
+O aplicativo executa `python youtube_worker.py URL_CANONICA PASTA_TEMPORARIA` como lista de argumentos, sem shell. O worker usa a API `YoutubeDL.extract_info(..., download=False, process=False, ie_key='Youtube')` uma vez e `process_info(track)` para baixar cada faixa. O FFmpeg apenas junta as faixas com `-c copy -movflags +faststart`. Não há cookies pessoais, proxy ou login.
+
+Se houver falha, copie os registros `YouTube [identificador]` da mesma importação. Uma resposta explícita de confirmação de bot ou HTTP 429 indica bloqueio/limitação de acesso automatizado. HTTP 403 sozinho não demonstra que o IP do Render foi bloqueado. Compare as versões impressas no build com o ambiente local; o arquivo render.yaml só configura automaticamente serviços vinculados ao Blueprint.
+
+Teste controlado local em 17/09/2026, antes da alteração dos logs: link LN4dE1W9X0U, usando `youtube_import.obtain` e o worker real, sem mocks no download. Download e remux concluídos em 34 s, arquivo de 414.036.466 bytes, duração de 1.336,77 s e áudio presente. Os arquivos do teste foram removidos ao encerrar. Esse resultado não mede nem garante acesso a partir do Render; a causa da falha remota depende dos registros dessa instância.

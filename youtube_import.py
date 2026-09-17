@@ -71,9 +71,16 @@ def obtain(folder, url, progress):
             progress(**value)
             last = value
     try:
+        from youtube_worker import redact_log
+        def server_log(line):
+            print(f'YouTube [{folder.name}] {redact_log(line)}', file=sys.stderr, flush=True)
         run_process([sys.executable, str(Path(__file__).with_name('youtube_worker.py')), url, str(folder)],
-                    timeout=1800, on_tick=report)
+                    timeout=1800, on_tick=report, on_stderr=server_log)
     except RuntimeError as exc:
+        # O stderr do worker fica em disco; publique somente um diagnóstico
+        # sanitizado para que a causa não desapareça dos logs do Render.
+        from youtube_worker import safe_diagnostic
+        print(f'YouTube import failed [{folder.name}]: {safe_diagnostic(exc)}', file=sys.stderr, flush=True)
         if result.is_file():
             error = json.loads(result.read_text(encoding='utf-8')).get('error')
             if error:

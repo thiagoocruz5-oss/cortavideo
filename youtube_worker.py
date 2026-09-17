@@ -4,9 +4,12 @@ import ipaddress
 import json
 import math
 import os
+import re
 import shutil
 import sys
 import time
+import traceback
+from importlib.metadata import version
 from pathlib import Path
 from urllib.parse import urlsplit
 from youtube_import import canonical_url, MAX_BYTES, node_runtime
@@ -81,16 +84,48 @@ def choose_formats(info):
     return video, audio
 
 
+def redact_log(detail):
+    detail = re.sub(r'\x1b\[[0-9;]*m', '', str(detail))
+    detail = re.sub(r'https?://\S+', '[URL omitida]', detail)
+    return re.sub(r'(?im)(cookie|authorization|token|password)\s*[:=].*', r'\1: [omitido]', detail)
+
+
+class ServerLogger:
+    def debug(self, message):
+        for line in redact_log(message).splitlines():
+            print(line, file=sys.stderr, flush=True)
+
+    info = debug
+    warning = debug
+    error = debug
+
+
+def safe_diagnostic(exc):
+    """Logs limitados, sem URLs assinadas, cabeçalhos de autenticação ou ANSI."""
+    detail = redact_log(exc)
+    return f'{type(exc).__name__}: ' + ' '.join(detail.split())[:1800]
+
+
 def friendly_error(exc):
+    if isinstance(exc, ImportError):
+        return 'Dependência de importação ausente no servidor. Refaça o deploy instalando requirements.txt e executando preparar_youtube.py no Build Command.'
     if isinstance(exc, OSError) and exc.errno == errno.ENOSPC:
         return 'Sem espaço em disco. Aguarde a limpeza ou importe um vídeo menor.'
     message = str(exc).lower()
+    if 'not a bot' in message or '429' in message:
+        return 'O YouTube bloqueou ou limitou o acesso automatizado deste servidor. Não é possível importar por este acesso agora. Envie o arquivo; não usamos login nem cookies para contornar o bloqueio.'
+    if '403' in message:
+        return 'O YouTube não permitiu baixar a mídia (HTTP 403). Isso pode ser uma restrição de acesso ou uma URL de mídia recusada; os logs do servidor contêm o diagnóstico.'
     if 'no space left' in message or 'disk full' in message:
         return 'Sem espaço em disco para importar o vídeo.'
     if any(x in message for x in ('sign in', 'confirm', 'bot', '403', '429', 'cookies', 'private', 'age-restricted', 'not available', 'unavailable', 'removed', 'copyright', 'country')):
         return 'O YouTube não permitiu acessar este vídeo a partir do servidor (privado, removido, restrito ou bloqueio do provedor). Tente outro vídeo público ou envie o arquivo.'
     if 'timed out' in message or 'timeout' in message:
         return 'Tempo limite ao acessar o YouTube. Tente novamente mais tarde.'
+    if any(x in message for x in ('certificate_verify_failed', 'certificate verify failed', 'ssl:')):
+        return 'O servidor não conseguiu validar a conexão segura com o YouTube. Confira os certificados e os logs do Render.'
+    if any(x in message for x in ('connection reset', 'connection refused', 'network is unreachable', 'name resolution', 'unable to download', 'remote end closed')):
+        return 'A conexão do servidor com o YouTube falhou ou foi interrompida. Tente novamente; se persistir, confira os logs do Render ou envie o arquivo.'
     if isinstance(exc, ValueError):
         return str(exc)
     return 'Falha ao importar pelo yt-dlp. O acesso pode estar bloqueado ou o extrator precisa ser atualizado. Tente outro vídeo ou envie o arquivo.'
@@ -110,9 +145,11 @@ def download(url, folder):
     folder = Path(folder)
     progress = folder / 'import-progress.json'
     node = node_runtime()
+    logger = ServerLogger()
+    logger.info(f'YouTube runtime: Python={sys.version.split()[0]} yt-dlp={version("yt-dlp")} EJS={version("yt-dlp-ejs")} Node={node}')
     # Memória do JS limitada; ele termina antes de carregar Whisper.
     os.environ['NODE_OPTIONS'] = '--max-old-space-size=96'
-    options = {'quiet': True, 'noprogress': True, 'no_warnings': True, 'noplaylist': True, 'cachedir': False,
+    options = {'quiet': True, 'noprogress': True, 'no_warnings': False, 'verbose': True, 'logger': logger, 'noplaylist': True, 'cachedir': False,
                'socket_timeout': 20, 'retries': 2, 'fragment_retries': 2, 'extractor_retries': 1,
                'concurrent_fragment_downloads': 1, 'buffersize': 64*1024, 'noresizebuffer': True,
                'max_filesize': MAX_BYTES, 'continuedl': True, 'overwrites': False,
@@ -124,6 +161,7 @@ def download(url, folder):
         info = ydl.extract_info(canonical_url(url), download=False, process=False, ie_key='Youtube')
         metadata = validate_metadata(info)
         video, audio = choose_formats(info)
+        logger.info(f'Selected video={video.get("format_id")} audio={audio.get("format_id") if audio else "combined"}; protocol={video.get("protocol")}')
         tracks = [('áudio', audio, 'audio.m4a'), ('vídeo', video, 'video.mp4')] if audio else [('vídeo e áudio', video, 'video.mp4')]
         estimate = sum(f.get('filesize') or f.get('filesize_approx') or 0 for _, f, _ in tracks)
         reserve = int(metadata['duration'] * 32000) + 128*1024**2
@@ -150,6 +188,7 @@ def download(url, folder):
                 fraction = f' {min(100, int(downloaded/total*100))}%' if total else f' {downloaded/1024**2:.1f} MB'
                 write_progress(progress, message=f'Baixando {label}…{fraction}', **metadata)
             write_progress(progress, message=f'Baixando {label}…', **metadata)
+            logger.info(f'Download stage: {label}; format={fmt.get("format_id")}')
             # Reutiliza metadados/URLs assinadas: não chama o extrator outra vez.
             ydl.params['outtmpl'] = {'default': str(folder / filename)}
             ydl._progress_hooks = [hook]
@@ -172,7 +211,7 @@ if __name__ == '__main__':
     try:
         result = download(sys.argv[1], folder)
     except Exception as exc:
-        print(f'YouTube import failed: {type(exc).__name__}', file=sys.stderr)
+        ServerLogger().error('YouTube import failed:\n' + ''.join(traceback.format_exception(exc)))
         result = {'error': friendly_error(exc)}
     (folder / 'import-result.json').write_text(json.dumps(result), encoding='utf-8')
     sys.exit(1 if 'error' in result else 0)
