@@ -255,3 +255,11 @@ O aplicativo executa `python youtube_worker.py URL_CANONICA PASTA_TEMPORARIA` co
 Se houver falha, copie os registros `YouTube [identificador]` da mesma importação. Uma resposta explícita de confirmação de bot ou HTTP 429 indica bloqueio/limitação de acesso automatizado. HTTP 403 sozinho não demonstra que o IP do Render foi bloqueado. Compare as versões impressas no build com o ambiente local; o arquivo render.yaml só configura automaticamente serviços vinculados ao Blueprint.
 
 Teste controlado local em 17/09/2026, antes da alteração dos logs: link LN4dE1W9X0U, usando `youtube_import.obtain` e o worker real, sem mocks no download. Download e remux concluídos em 34 s, arquivo de 414.036.466 bytes, duração de 1.336,77 s e áudio presente. Os arquivos do teste foram removidos ao encerrar. Esse resultado não mede nem garante acesso a partir do Render; a causa da falha remota depende dos registros dessa instância.
+
+### Proteção de rede do importador
+
+A URL inicial continua limitada a links individuais do YouTube. No worker isolado, os destinos HTTPS podem pertencer às famílias youtube.com, youtube-nocookie.com, googlevideo.com, ytimg.com, google.com, googleapis.com, gstatic.com, ggpht.com e googleusercontent.com, incluindo subdomínios. A comparação respeita limites de domínio (google.com.evil.test não é aceito). Não há liberação genérica de destinos externos.
+
+Cada requisição/redirecionamento via urllib é validado. Credenciais na URL, portas diferentes de 443 e protocolos não HTTPS são recusados. Na conexão, o endereço IP efetivo precisa ser público: localhost, redes privadas, link-local, metadata, multicast e IPv6 interno continuam bloqueados mesmo quando um nome autorizado resolve para esses endereços. O transporte permanece urllib, sem proxies ou transportes que ignorem essa verificação.
+
+Uma recusa gera `YouTube network denied hostname=... reason=...`, sem caminho ou parâmetros da URL. O erro antigo não incluía hostname, portanto não permite identificar retroativamente qual destino o Render recusou. A ampliação das famílias corrige a limitação da lista antiga; uma eventual recusa remota restante exige o novo registro para identificar o destino, sem liberar domínios arbitrariamente.

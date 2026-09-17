@@ -49,6 +49,45 @@ class YoutubeValidationTests(unittest.TestCase):
         for changes in [{'is_live':True},{'availability':'private'},{'duration':None},{'duration':7201},{'duration':float('nan')},{'age_limit':18},{'_type':'playlist'}]:
             with self.assertRaises(ValueError):worker.validate_metadata({**info,**changes})
 
+    def test_google_youtube_families_and_new_cdn_subdomains(self):
+        for host in ['www.google.com', 'consent.google.com', 'consent.youtube.com',
+                     'youtube.googleapis.com', 'youtubei.googleapis.com', 'rr99.sn-new.googlevideo.com',
+                     'i.ytimg.com', 'yt3.ggpht.com', 'www.gstatic.com', 'lh3.googleusercontent.com',
+                     'WWW.YOUTUBE.COM.']:
+            worker.allowed_remote('https://' + host + '/path?token=hidden')
+
+    def test_redirect_targets_revalidated_and_dns_private_result_blocked(self):
+        from urllib.request import HTTPRedirectHandler, Request
+        handler = HTTPRedirectHandler()
+        request = Request(URL)
+        for target in ['https://consent.youtube.com/m', 'https://www.google.com/sorry/index',
+                       'https://rr9.googlevideo.com/video']:
+            request = handler.redirect_request(request, None, 302, 'Found', {}, target)
+            worker.network_guard('urllib.Request', (request.full_url,))
+        for target in ['https://localhost/', 'https://169.254.169.254/latest/meta-data/',
+                       'https://metadata.google.internal/', 'https://127.0.0.1/',
+                       'https://youtube.com.evil.test/', 'https://evilgoogle.com/',
+                       'https://google.com:444/', 'https://user:pass@youtube.com/']:
+            redirected = handler.redirect_request(request, None, 302, 'Found', {}, target)
+            with self.assertRaises(ValueError):
+                worker.network_guard('urllib.Request', (redirected.full_url,))
+        # Mesmo um domínio autorizado não pode conectar a um IP interno (DNS rebinding).
+        worker.allowed_remote('https://www.google.com/')
+        for ip in ['0.0.0.0', '127.0.0.1', '10.1.2.3', '172.16.0.1', '192.168.1.2',
+                   '169.254.169.254', '100.100.100.200', '::1', 'fc00::1', 'fe80::1',
+                   '::ffff:127.0.0.1', '224.0.0.1', 'ff02::1']:
+            with self.subTest(ip=ip), self.assertRaises(ValueError):
+                worker.network_guard('socket.connect', (None, (ip, 443)))
+
+    def test_denied_destination_logs_only_host_and_reason(self):
+        log = io.StringIO()
+        with patch('sys.stderr', log), self.assertRaises(ValueError) as error:
+            worker.allowed_remote('https://bad.example/private-path?token=secret')
+        for value in (log.getvalue(), str(error.exception)):
+            self.assertIn('bad.example', value)
+            self.assertNotIn('private-path', value)
+            self.assertNotIn('secret', value)
+
     def test_appropriate_formats_and_progressive_no_double_audio(self):
         info=metadata();info['formats'][0].pop('protocol');v,a=worker.choose_formats(info)
         self.assertEqual((v['format_id'],a['format_id']),('v','a'))

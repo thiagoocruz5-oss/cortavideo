@@ -16,17 +16,34 @@ from youtube_import import canonical_url, MAX_BYTES, node_runtime
 from transcription_worker import write_progress
 
 
+# Famílias de serviços, não nomes individuais de servidores/CDNs.
+# A lista da URL fornecida pelo usuário continua restrita em canonical_url.
+REMOTE_DOMAINS = ('youtube.com', 'youtube-nocookie.com', 'googlevideo.com',
+                  'ytimg.com', 'google.com', 'googleapis.com', 'gstatic.com',
+                  'ggpht.com', 'googleusercontent.com')
+
+
+def deny_remote(host, reason):
+    # Nunca registrar path, query, credenciais ou a URL assinada.
+    host = re.sub(r'[^a-zA-Z0-9.:[\]-]', '?', host or '(ausente)')[:253]
+    print(f'YouTube network denied hostname={host} reason={reason}', file=sys.stderr, flush=True)
+    raise ValueError(f'Destino de rede não permitido para importação do YouTube (hostname={host}; motivo={reason}).')
+
+
 def allowed_remote(url):
+    h = ''
     try:
         p = urlsplit(url)
-        h = p.hostname or ''
-        allowed = any(h == base or h.endswith('.' + base) for base in
-                      ('youtube.com', 'youtube-nocookie.com', 'googlevideo.com', 'ytimg.com'))
-        allowed = allowed or h in ('youtubei.googleapis.com', 'consent.google.com')
-        if p.scheme != 'https' or p.username or p.password or p.port not in (None, 443) or not allowed:
-            raise ValueError()
-    except ValueError:
-        raise ValueError('Destino de rede não permitido para importação do YouTube.') from None
+        h = (p.hostname or '').rstrip('.').lower()
+        port = p.port
+    except (ValueError, TypeError):
+        deny_remote(h, 'URL inválida')
+    if p.scheme != 'https':
+        deny_remote(h, 'HTTPS obrigatório')
+    if p.username is not None or p.password is not None or port not in (None, 443):
+        deny_remote(h, 'credenciais ou porta não permitidas')
+    if not any(h == base or h.endswith('.' + base) for base in REMOTE_DOMAINS):
+        deny_remote(h, 'domínio fora das famílias Google/YouTube autorizadas')
 
 
 def network_guard(event, args):
@@ -36,10 +53,14 @@ def network_guard(event, args):
     elif event == 'socket.connect':
         address = args[1]
         try:
-            public = isinstance(address, tuple) and ipaddress.ip_address(address[0]).is_global
+            ip = ipaddress.ip_address(address[0]) if isinstance(address, tuple) else None
+            public = ip is not None and ip.is_global and not ip.is_multicast
+            if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
+                public = public and ip.ipv4_mapped.is_global and not ip.ipv4_mapped.is_multicast
         except ValueError:
             public = False
         if not public:
+            print('YouTube network denied hostname=(conexão) reason=IP de conexão não público', file=sys.stderr, flush=True)
             raise ValueError('Conexão com endereço interno não permitida.')
 
 
