@@ -117,8 +117,10 @@ class ServerLogger:
             print(line, file=sys.stderr, flush=True)
 
     info = debug
-    warning = debug
     error = debug
+
+    def warning(self, message):
+        self.debug(f'YouTube warning category={error_category(message)}: {message}')
 
 
 def safe_diagnostic(exc):
@@ -127,7 +129,39 @@ def safe_diagnostic(exc):
     return f'{type(exc).__name__}: ' + ' '.join(detail.split())[:1800]
 
 
+def error_category(exc):
+    message = str(exc).lower()
+    if isinstance(exc, MemoryError) or any(x in message for x in ('memoryerror', 'out of memory', 'cannot allocate memory', 'std::bad_alloc')):
+        return 'memory'
+    if '429' in message or 'too many requests' in message:
+        return 'rate_limit'
+    if 'not a bot' in message:
+        return 'automated_access_block'
+    if 'failed to extract any player response' in message:
+        return 'player_extraction'
+    if any(x in message for x in ('sign in', 'login required', 'private video', 'age-restricted', 'authentication')):
+        return 'authentication_or_restriction'
+    if any(x in message for x in ('video unavailable', 'video is unavailable', 'video has been removed', 'not available', 'copyright', 'country')):
+        return 'unavailable'
+    if re.search(r'\b(?:http(?: error)?\s*[: ]\s*[45]\d\d|403|401)\b', message):
+        return 'http_error'
+    if any(x in message for x in ('timed out', 'timeout', 'connection', 'name resolution', 'network', 'certificate', 'unable to download')):
+        return 'network'
+    return 'other'
+
+
 def friendly_error(exc):
+    category = error_category(exc)
+    if category == 'player_extraction':
+        return 'O yt-dlp não conseguiu obter a resposta do player do YouTube, antes do download. Os logs anteriores mostram as falhas das requisições; esse erro sozinho não comprova bloqueio de IP nem falta de memória.'
+    if category == 'memory':
+        return 'O processo relatou falta de memória durante a importação. Tente novamente com um vídeo menor.'
+    if category == 'rate_limit':
+        return 'O YouTube bloqueou ou limitou temporariamente as requisições deste servidor (HTTP 429). Aguarde antes de tentar novamente.'
+    if category == 'authentication_or_restriction':
+        return 'Este vídeo exige autenticação ou tem restrição de acesso. Use um vídeo público acessível sem login ou envie o arquivo.'
+    if category == 'unavailable':
+        return 'O vídeo está indisponível, foi removido ou tem restrição de disponibilidade. Tente outro vídeo público ou envie o arquivo.'
     if isinstance(exc, ImportError):
         return 'Dependência de importação ausente no servidor. Refaça o deploy instalando requirements.txt e executando preparar_youtube.py no Build Command.'
     if isinstance(exc, OSError) and exc.errno == errno.ENOSPC:
@@ -168,6 +202,7 @@ def download(url, folder):
     node = node_runtime()
     logger = ServerLogger()
     logger.info(f'YouTube runtime: Python={sys.version.split()[0]} yt-dlp={version("yt-dlp")} EJS={version("yt-dlp-ejs")} Node={node}')
+    logger.info(f'YouTube configuration: default_clients={YoutubeIE._DEFAULT_CLIENTS}; extractor_args=default; headers=default; IP_family=system; transport=urllib; proxy=disabled')
     # Memória do JS limitada; ele termina antes de carregar Whisper.
     os.environ['NODE_OPTIONS'] = '--max-old-space-size=96'
     options = {'quiet': True, 'noprogress': True, 'no_warnings': False, 'verbose': True, 'logger': logger, 'noplaylist': True, 'cachedir': False,
@@ -232,7 +267,7 @@ if __name__ == '__main__':
     try:
         result = download(sys.argv[1], folder)
     except Exception as exc:
-        ServerLogger().error('YouTube import failed:\n' + ''.join(traceback.format_exception(exc)))
+        ServerLogger().error(f'YouTube import failed category={error_category(exc)}:\n' + ''.join(traceback.format_exception(exc)))
         result = {'error': friendly_error(exc)}
     (folder / 'import-result.json').write_text(json.dumps(result), encoding='utf-8')
     sys.exit(1 if 'error' in result else 0)

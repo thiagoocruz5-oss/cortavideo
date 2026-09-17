@@ -74,7 +74,11 @@ def run_process(args, cwd=None, timeout=7200, on_tick=None, on_stderr=None):
                 stderr.seek(0, 2)
                 stderr.seek(max(0, stderr.tell() - 2500))
                 detail = stderr.read().decode('utf-8', errors='replace')
-                raise RuntimeError(f'Processamento interrompido (código {code}). Pode faltar memória. {detail}')
+                # Código 1 (ou SIGKILL) sozinho não comprova falta de memória.
+                memory = any(marker in detail.lower() for marker in
+                             ('memoryerror', 'out of memory', 'cannot allocate memory', 'std::bad_alloc'))
+                reason = ' Falta de memória relatada pelo processo.' if memory else ''
+                raise RuntimeError(f'Processamento interrompido (código {code}).{reason} {detail}')
             stdout.seek(0)
             return stdout.read(2 * 1024 * 1024).decode('utf-8', errors='replace')
         finally:

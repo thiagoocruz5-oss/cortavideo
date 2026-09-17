@@ -117,6 +117,33 @@ class YoutubeValidationTests(unittest.TestCase):
         self.assertIn('bloqueou ou limitou', worker.friendly_error(RuntimeError("Sign in to confirm you’re not a bot")))
         self.assertIn('HTTP 403', worker.friendly_error(RuntimeError('HTTP Error 403')))
 
+    def test_player_error_and_other_causes_are_distinct(self):
+        cases = [('Failed to extract any player response', 'player_extraction'),
+                 ('HTTP Error 429: Too Many Requests', 'rate_limit'),
+                 ('HTTP Error 403: Forbidden', 'http_error'),
+                 ('Private video. Sign in', 'authentication_or_restriction'),
+                 ('Video unavailable', 'unavailable'),
+                 ('Connection reset by peer', 'network'),
+                 ('MemoryError', 'memory')]
+        for message, category in cases:
+            self.assertEqual(worker.error_category(RuntimeError(message)), category)
+        self.assertIn('antes do download', worker.friendly_error(RuntimeError(cases[0][0])))
+
+    def test_exit_one_is_not_memory_evidence(self):
+        import sys
+        from process_runner import run_process
+        for detail, memory in [('Failed to extract any player response', False), ('MemoryError', True)]:
+            with self.assertRaises(RuntimeError) as error:
+                run_process([sys.executable, '-c', 'import sys; print(sys.argv[1], file=sys.stderr); sys.exit(1)', detail])
+            self.assertEqual('Falta de memória relatada' in str(error.exception), memory)
+            self.assertNotIn('Pode faltar memória', str(error.exception))
+
+    def test_player_warning_records_underlying_category(self):
+        log = io.StringIO()
+        with patch('sys.stderr', log):
+            worker.ServerLogger().warning('HTTP Error 429: Too Many Requests')
+        self.assertIn('category=rate_limit', log.getvalue())
+
     def test_full_stderr_survives_worker_failure_without_tail_truncation(self):
         import sys
         from process_runner import run_process
