@@ -9,6 +9,7 @@ import binaries
 import threading
 import uuid
 import processing
+import youtube_import
 import socket
 import os
 import shutil
@@ -96,18 +97,33 @@ def load_segments(key):
     return json.loads((DATA / key / 'transcript.json').read_text(encoding='utf-8'))
 
 
-def analyze(key):
+def analyze(key, audio_source=None):
     folder = DATA / key
     try:
         duration, audio = processing.probe(folder / 'source.mp4')
         update(key, status='transcribing', message='Transcrevendo em blocos com o modelo local…')
-        segments = processing.transcribe(folder / 'source.mp4', progress=lambda **state: update(key, **state)) if audio else []
+        segments = processing.transcribe(audio_source or folder / 'source.mp4', progress=lambda **state: update(key, **state)) if audio else []
         (folder / 'transcript.json').write_text(json.dumps(segments), encoding='utf-8')
+        update(key, message='Gerando sugestões de cortes…')
         update(key, status='ready', message='Cortes prontos para revisar.' if segments else 'Sem fala detectada. Ajuste seu corte manualmente.',
                duration=duration, suggestions=processing.suggest(segments, duration))
     except Exception as exc:
         update(key, status='error', message=str(exc))
         shutil.rmtree(folder, ignore_errors=True)
+
+
+def import_youtube(key, url):
+    folder = DATA / key
+    try:
+        metadata, audio = youtube_import.obtain(folder, url, lambda **state: update(key, **state))
+        update(key, title=metadata['title'], youtube_id=metadata['youtube_id'])
+        analyze(key, audio_source=audio)
+    except Exception as exc:
+        update(key, status='error', message=str(exc))
+        shutil.rmtree(folder, ignore_errors=True)
+    finally:
+        # Só a faixa separada; source.mp4 é necessário para prévia e cortes.
+        (folder / 'audio.m4a').unlink(missing_ok=True)
 
 
 def render(key, parent, start, end, captions, position=0.5):
@@ -135,8 +151,13 @@ def cleanup_expired():
         for folder in DATA.iterdir():
             if folder.is_dir() and not folder.is_symlink() and len(folder.name) == 32 and all(c in '0123456789abcdef' for c in folder.name):
                 with FILE_LOCK:
-                    if not ACTIVE_FILES.get(folder) and folder.stat().st_mtime < cutoff:
-                        shutil.rmtree(folder, ignore_errors=True)
+                    if not ACTIVE_FILES.get(folder):
+                        for export in folder.glob('*.mp4'):
+                            stem = export.stem
+                            if len(stem) == 32 and all(c in '0123456789abcdef' for c in stem) and export.stat().st_atime < cutoff:
+                                export.unlink()
+                        if folder.stat().st_mtime < cutoff:
+                            shutil.rmtree(folder, ignore_errors=True)
         with LOCK:
             for key, job in list(JOBS.items()):
                 if job.get('created', time.time()) < cutoff and job.get('status') in ('ready', 'error'):
@@ -278,6 +299,8 @@ class Handler(BaseHTTPRequestHandler):
                     if not ACTIVE_FILES[folder]:
                         ACTIVE_FILES.pop(folder)
                     try:
+                        file_stat = path.stat()
+                        os.utime(path, ns=(time.time_ns(), file_stat.st_mtime_ns))
                         os.utime(folder, None)
                     except OSError:
                         pass
@@ -291,6 +314,39 @@ class Handler(BaseHTTPRequestHandler):
         upload_folder = None
         try:
             length = int(self.headers.get('Content-Length', '0'))
+            if self.path == '/api/import/youtube':
+                if not 0 < length < 4096:
+                    raise ValueError('Pedido de importação inválido.')
+                self.connection.settimeout(30)
+                data = json.loads(self.rfile.read(length))
+                if not isinstance(data, dict):
+                    raise ValueError('Pedido de importação inválido.')
+                url = youtube_import.canonical_url(data.get('url'))
+                if not HEAVY_SLOT.acquire(blocking=False):
+                    return self.json({'message': 'Outro vídeo está sendo processado. Aguarde e tente novamente.'}, 429)
+                owns_slot = True
+                # Reutiliza apenas trabalhos completos desta instância e com os arquivos presentes.
+                with LOCK, FILE_LOCK:
+                    for existing, task in JOBS.items():
+                        if task.get('source_url') == url and task.get('status') == 'ready' and 'duration' in task:
+                            directory = DATA / existing
+                            if (directory / 'source.mp4').is_file() and (directory / 'transcript.json').is_file():
+                                os.utime(directory, None)
+                                task['created'] = time.time()
+                                return self.json({'id': existing, 'reused': True}, 200)
+                if not all(binaries.health().values()):
+                    return self.json({'message': 'FFmpeg e ffprobe precisam estar instalados para importar. Veja o README.'}, 503)
+                key = uuid.uuid4().hex
+                folder = DATA / key
+                upload_folder = folder
+                folder.mkdir()
+                with LOCK:
+                    JOBS[key] = {'created': time.time(), 'status': 'importing', 'source_url': url,
+                                 'message': 'Obtendo informações do vídeo…'}
+                POOL.submit(guarded_task, import_youtube, key, url)
+                owns_slot = False
+                upload_folder = None
+                return self.json({'id': key}, 202)
             if self.path == '/api/upload':
                 if not 0 < length <= MAX_UPLOAD:
                     return self.json({'message': 'Limite de upload: 1 GB.'}, 413)

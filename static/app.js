@@ -1,5 +1,5 @@
 const $ = id => document.getElementById(id);
-let current = null, job = null, exporting = false;
+let current = null, job = null, exporting = false, importing = false;
 let activeCut = 0;
 const cutPositions = new Map();
 function status(message, error = false) { $('status').hidden = false; $('status').textContent = message; $('status').className = error ? 'error' : ''; }
@@ -37,7 +37,7 @@ async function poll(id, notify) {
     }
     if (result.status === 'error') throw new Error(result.message);
     if (result.status === 'ready') return result;
-    notify(result.message);
+    notify(result.title ? `${result.title}${result.duration ? ' · ' + clock(result.duration) : ''} — ${result.message}` : result.message);
     await new Promise(resolve => setTimeout(resolve, 1800));
   }
 }
@@ -95,8 +95,32 @@ function stepTime(id, delta) {
   editTime(id);
 }
 function select(c, index) { activeCut = index; $('framing').value = cutPositions.get(`${current}:${index}`) ?? 50; updateFraming(); $('video').pause(); $('start').value = c.start; $('end').value = c.end; $('video').currentTime = c.start; $('download').hidden = true; $('finalPreview').hidden = true; $('finalVideo').pause(); document.querySelectorAll('.suggestion').forEach((el, i) => el.classList.toggle('selected', index === i)); validate(); caption(); }
-function showEditor() { $('uploadSection').hidden = true; $('editor').hidden = false; $('step2').classList.add('active'); $('video').src = `/media/${current}/source.mp4`; $('suggestions').replaceChildren(); $('count').textContent = job.suggestions.length; job.suggestions.forEach((c, i) => { const button = document.createElement('button'); button.className = 'suggestion'; const title = document.createElement('strong'); title.textContent = `${String(i+1).padStart(2,'0')} / ${clock(c.start)} — ${clock(c.end)}`; const text = document.createElement('p'); text.textContent = c.text || 'Trecho sem fala. Ajuste o intervalo ao lado.'; button.append(title, text); button.onclick = () => select(c, i); $('suggestions').append(button); }); $('transcript').textContent = job.segments.map(s => `${clock(s.start)}  ${s.text}`).join('\n') || 'Nenhuma fala detectada.'; $('captions').disabled = !job.segments.length; $('captions').checked = !!job.segments.length; $('start').max = job.duration; $('end').max = job.duration; select(job.suggestions[0] || {start: 0, end: Math.min(45, job.duration)}, 0); }
-async function upload(file) { if (!file) return; if (!file.name.toLowerCase().endsWith('.mp4') || file.size > 1024 ** 3) return status('Escolha um MP4 de até 1 GB.', true); $('file').disabled = true; status('Enviando vídeo…'); try { const result = await request('/api/upload', {method:'POST', headers:{'Content-Type':'application/octet-stream'}, body:file}); current = result.id; job = await poll(current, message => status(message)); showEditor(); status(job.message); } catch (error) { status(error.message, true); } finally { $('file').disabled = false; $('file').value = ''; } }
+function showEditor() { $('videoTitle').textContent = job.title ? `${job.title} · ${clock(job.duration)}` : ''; $('videoTitle').hidden = !job.title; $('seek').max = job.duration; $('uploadSection').hidden = true; $('editor').hidden = false; $('step2').classList.add('active'); $('video').src = `/media/${current}/source.mp4`; $('suggestions').replaceChildren(); $('count').textContent = job.suggestions.length; job.suggestions.forEach((c, i) => { const button = document.createElement('button'); button.className = 'suggestion'; const title = document.createElement('strong'); title.textContent = `${String(i+1).padStart(2,'0')} / ${clock(c.start)} — ${clock(c.end)}`; const text = document.createElement('p'); text.textContent = c.text || 'Trecho sem fala. Ajuste o intervalo ao lado.'; button.append(title, text); button.onclick = () => select(c, i); $('suggestions').append(button); }); $('transcript').textContent = job.segments.map(s => `${clock(s.start)}  ${s.text}`).join('\n') || 'Nenhuma fala detectada.'; $('captions').disabled = !job.segments.length; $('captions').checked = !!job.segments.length; $('start').max = job.duration; $('end').max = job.duration; select(job.suggestions[0] || {start: 0, end: Math.min(45, job.duration)}, 0); }
+async function upload(file) { if (!file || importing) return; if (!file.name.toLowerCase().endsWith('.mp4') || file.size > 1024 ** 3) return status('Escolha um MP4 de até 1 GB.', true); setImporting(true); status('Enviando vídeo…'); try { const result = await request('/api/upload', {method:'POST', headers:{'Content-Type':'application/octet-stream'}, body:file}); current = result.id; job = await poll(current, message => status(message)); showEditor(); status(job.message); } catch (error) { status(error.message, true); } finally { setImporting(false); $('file').value = ''; } }
+function setImporting(value) {
+  importing = value;
+  for (const id of ['file','youtubeUrl','importYoutube']) $(id).disabled = value;
+}
+async function importYoutube(event) {
+  event.preventDefault();
+  if (importing) return;
+  const url = $('youtubeUrl').value.trim();
+  if (!url) return status('Cole o link de um vídeo do YouTube.', true);
+  setImporting(true);
+  status('Obtendo informações do vídeo…');
+  try {
+    const result = await request('/api/import/youtube', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({url})});
+    current = result.id;
+    job = await poll(current, message => status(message));
+    showEditor();
+    status(result.reused ? 'Vídeo já importado. Arquivos e transcrição reutilizados.' : job.message);
+  } catch(error) {
+    status(error.message, true);
+  } finally {
+    setImporting(false);
+  }
+}
+$('youtubeForm').onsubmit = importYoutube;
 $('file').onchange = e => upload(e.target.files[0]);
 for (const type of ['dragenter','dragover']) $('drop').addEventListener(type, e => { e.preventDefault(); $('drop').classList.add('drag'); });
 for (const type of ['dragleave','drop']) $('drop').addEventListener(type, e => { e.preventDefault(); $('drop').classList.remove('drag'); });
@@ -111,7 +135,7 @@ function caption() {
   $('caption').textContent = cue ? cue.text : '';
 }
 $('captions').onchange = () => { $('download').hidden = true; $('finalPreview').hidden = true; $('finalVideo').pause(); caption(); };
-$('video').ontimeupdate = () => { caption(); if (Number.isFinite(values().end) && $('video').currentTime >= values().end) $('video').pause(); };
+$('video').ontimeupdate = () => { $('seek').value = $('video').currentTime; $('seekTime').textContent = clock($('video').currentTime); caption(); if (Number.isFinite(values().end) && $('video').currentTime >= values().end) $('video').pause(); };
 $('video').onpause = () => { $('play').textContent = '▶ Reproduzir trecho'; };
 $('play').onclick = async () => { if (!$('video').paused) return $('video').pause(); const {start,end} = values(); if (!timeState(start, end, job.duration).inside) return; if ($('video').currentTime < start || $('video').currentTime >= end - .1) $('video').currentTime = start; try { await $('video').play(); $('play').textContent = 'Ⅱ Pausar'; } catch { status('O navegador não reproduz este codec. A exportação MP4 ainda pode funcionar.', true); } };
 $('newVideo').onclick = () => { $('video').pause(); $('editor').hidden = true; $('uploadSection').hidden = false; $('status').hidden = true; $('step2').classList.remove('active'); $('step3').classList.remove('active'); };
@@ -183,3 +207,16 @@ $('download').onclick = async event => {
     link.textContent = '↓ Baixar vídeo';
   }
 };
+
+function seekVideo(time) {
+  if (!job || !Number.isFinite(time)) return;
+  const video = $('video');
+  video.pause();
+  video.currentTime = Math.max(0, Math.min(job.duration, time));
+  $('seek').value = video.currentTime;
+  $('seekTime').textContent = clock(video.currentTime);
+  caption();
+}
+$('seek').oninput = () => seekVideo(Number($('seek').value));
+$('backward').onclick = () => seekVideo($('video').currentTime - 5);
+$('forward').onclick = () => seekVideo($('video').currentTime + 5);

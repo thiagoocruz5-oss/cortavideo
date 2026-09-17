@@ -4,7 +4,7 @@
 
 `render.yaml` configura a instalação e a preparação automática do modelo. Para o serviço **já existente**, configure uma vez no painel:
 
-- **Build Command:** `python -m pip install -r requirements.txt && python preparar_modelo.py`
+- **Build Command:** `python -m pip install -r requirements.txt && python preparar_youtube.py && python preparar_modelo.py`
 - **Start Command:** `python app.py`
 - **WHISPER_MODEL:** `tiny`, igual no build e na execução.
 - **LOW_MEMORY_MODE:** `1`. Se o serviço existente ainda tiver `WHISPER_MODEL=base`, altere para `tiny` no painel.
@@ -193,3 +193,55 @@ Referências: [opções do faster-whisper](https://github.com/SYSTRAN/faster-whi
 Em duas execuções sequenciais com o mesmo áudio de fala de 90 segundos, `tiny`/int8, no Windows: antes **61,13 s / 58,33 s**, depois **13,00 s / 13,03 s**. Pico residente do worker: antes **268,1–268,8 MiB**, depois **243,0–243,1 MiB**. Ambos produziram 181 palavras nessa amostra; isso não substitui avaliação de precisão com outros áudios. O ganho varia com fala, ruído e CPU. Não é medição do serviço completo no Render nem garantia absoluta de 512 MB.
 
 Validação atual: 61 testes Python com o teste de mídia habilitado e 20 JavaScript, além de upload/transcrição/exportação/download HTTP reais. Foram testados progresso por bloco, carga única do modelo, limite da janela, download completo e parcial, cliente desconectado seguido de retomada, proteção contra limpeza, arquivo ausente, saturação e falhas de rede/timeout na interface.
+
+
+## Importar do YouTube
+
+Na tela inicial, escolha **Selecionar vídeo** ou cole um link em **Colar link do YouTube** e clique em **Importar vídeo**. O título, a duração e as etapas aparecem durante o processamento. O editor abre quando a mídia local e a transcrição estão prontas. A prévia usa o MP4 do servidor, sem player incorporado do YouTube. Além dos controles de corte, há uma barra de navegação e botões para avançar/voltar cinco segundos.
+
+### Instalação adicional
+
+Instale **Node.js 22 ou superior** (https://nodejs.org/) e atualize as dependências Python. No Windows:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe preparar_youtube.py
+.\.venv\Scripts\python.exe app.py
+```
+
+No Render, mantenha `WHISPER_MODEL=tiny` e `LOW_MEMORY_MODE=1`, configure `NODE_VERSION=22.22.0` e use:
+
+- Build: `python -m pip install -r requirements.txt && python preparar_youtube.py && python preparar_modelo.py`
+- Start: `python app.py`
+
+Preserve as etapas de instalação de FFmpeg/ffprobe já existentes. `render.yaml` inclui essas configurações, mas serviços criados manualmente precisam ser atualizados no painel. `preparar_youtube.py` verifica Node e os pacotes, sem baixar vídeos. O yt-dlp/EJS está fixado na versão testada em requirements.txt; atualize essa dependência e rode os testes se mudanças do YouTube exigirem uma versão nova.
+
+### Velocidade, qualidade e memória
+
+- O yt-dlp roda em processo separado, com download sequencial direto para disco, buffer de 64 KiB, limite total de 1 GiB e verificações de espaço livre. Não carrega o vídeo inteiro na memória.
+- Apenas links de vídeos individuais são aceitos. Metadados são obtidos uma vez; as URLs das faixas são reutilizadas na mesma importação.
+- Seleciona H.264/MP4 e AAC/M4A, entre 720 e 1080 pixels no lado menor, no máximo 1920 no lado maior. Prefere 30 fps quando existe na resolução escolhida, aceitando até 60 fps. Não baixa 4K nem escolhe silenciosamente 360p. Se não houver formato compatível, mostra erro e mantém a alternativa de upload.
+- Baixa áudio primeiro e vídeo depois, uma vez cada. Se o formato já contém áudio, baixa somente esse arquivo. FFmpeg junta as faixas com `-c copy`, sem recodificação, e prepara o MP4 para reprodução progressiva. A recodificação ocorre apenas na exportação do corte.
+- O download termina antes de iniciar Whisper. A faixa de áudio separada alimenta a conversão única mono/16 kHz e a transcrição existente em blocos limitados. Não há downloader e modelo carregados simultaneamente. Node recebe limite de heap de 96 MiB; esse limite não corresponde ao consumo total de todos os processos.
+- Uma única vaga de processamento pesado é compartilhada entre upload, importação e exportação. Uma importação concluída do mesmo link é reutilizada enquanto a tarefa e os arquivos existem nesta instância.
+- O arquivo original de vídeo separado é removido depois da montagem do MP4; o áudio separado é removido depois da análise. Em erro, a pasta da importação é removida. Não se armazenam miniaturas, dumps completos de metadados nem outra cópia de preview.
+- Source e exports seguem a retenção de 24 horas configurável por `FILE_TTL_HOURS`. Exports antigos também expiram individualmente. A limpeza não remove arquivos de pastas com transferências ativas. Downloads renovam o acesso sem alterar o ETag, preservando a retomada.
+- No Linux os subprocessos usam grupos próprios, permitindo encerrar filhos como Node em timeout/encerramento. No Windows permanece o encerramento da árvore de processos. O download tem limite de 30 minutos, socket de 20 segundos e poucas tentativas. A API responde com o identificador da tarefa imediatamente, sem manter a requisição de importação aberta até terminar.
+
+### Segurança e limitações práticas
+
+Aceita `youtube.com/watch`, `youtu.be`, `/shorts/` e `/embed/` com ID válido; normaliza para uma URL HTTPS de vídeo individual e descarta parâmetros adicionais. Rejeita domínios semelhantes, credenciais, portas personalizadas, arquivos locais, playlists e URLs arbitrárias. Apenas o extrator YouTube é registrado. O worker limita destinos HTTPS, verifica redirecionamentos pelo transporte Urllib e bloqueia conexões a IPs privados/locais. Os subprocessos recebem argumentos separados, sem concatenar comandos de shell. Não usa cookies, login, proxies ou mecanismos para contornar restrições.
+
+O YouTube pode bloquear IPs de datacenter, exigir autenticação ou não oferecer os formatos selecionados. Um link que funciona no navegador pessoal pode falhar no Render. Lives, vídeos privados, restritos, removidos ou sem formatos compatíveis não são importados. Nesses casos, o aplicativo informa o problema e oferece o upload tradicional.
+
+O Render gratuito possui CPU limitada e disco temporário. Reinícios/redeploys podem apagar mídia, tarefas e resultados. O download, a montagem e a extração precisam de espaço em disco, inclusive uma cópia temporária durante o remux. As verificações reduzem falhas, mas não reservam disco contra outros processos. Preview e download final consomem tráfego de saída. Não há garantia de tempo de processamento ou certificação de todo o serviço sob 512 MB no Render; valide o consumo após publicar. Mantenha a página aberta para acompanhar o trabalho. Um encerramento forçado pode impedir a limpeza imediata.
+
+Referências: [yt-dlp/EJS e runtimes](https://github.com/yt-dlp/yt-dlp/wiki/EJS), [Node no Render](https://render.com/docs/node-version), [Render gratuito](https://render.com/docs/free).
+
+### Validação da importação
+
+A suíte usa mocks/fixtures para não depender do YouTube: URLs e domínios, metadados, seleção de qualidade, falhas, espaço livre, arquivos temporários, reutilização, transcrição da faixa importada, preview, controles de tempo, exportação e download. Com `CORTAVIDEO_MEDIA_TESTS=1`, a integração usa servidor HTTP e FFmpeg reais, com transporte YouTube e texto de transcrição controlados.
+
+Também foi realizado um download real independente: vídeo público de 635 segundos, H.264 1080p com AAC, cerca de 268 MB, importado e montado em 41,1 segundos no Windows. Esse teste verificou mídia completa com áudio; não mede a duração da transcrição nem prevê a velocidade no Render. Os arquivos desse teste foram removidos.
+
+Resultado final desta versão: **78 testes Python e 24 JavaScript passaram**, com os testes reais de FFmpeg habilitados.

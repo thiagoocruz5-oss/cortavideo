@@ -5,12 +5,18 @@ import tempfile
 import threading
 import os
 import time
+import signal
 
 ACTIVE = set()
 LOCK = threading.Lock()
 
 
 def kill_process(process):
+    if os.name != 'nt':
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
     if os.name == 'nt':
         # O executável do venv pode iniciar outro Python como processo filho.
         try:
@@ -39,10 +45,10 @@ atexit.register(stop_all)
 
 
 def run_process(args, cwd=None, timeout=7200, on_tick=None):
-    # Nenhum pipe cresce na RAM. Todos os processos iniciados aqui são folhas.
+    # Logs em disco. Sessão própria permite encerrar também filhos (ex.: Node do yt-dlp).
     with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
         process = subprocess.Popen(args, cwd=cwd, stdout=stdout, stderr=stderr,
-                                   stdin=subprocess.DEVNULL)
+                                   stdin=subprocess.DEVNULL, start_new_session=os.name != 'nt')
         with LOCK:
             ACTIVE.add(process)
         try:

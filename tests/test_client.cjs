@@ -24,14 +24,19 @@ function editor(start='243,73', end='293,26') {
   function element(id) {
     if (!elements.has(id)) elements.set(id, {value:'', textContent:'', hidden:false, disabled:false,
       classList:{add(){},remove(){},toggle(){}},style:{}, dataset:{},
-      setAttribute(){},addEventListener(){},pause(){this.paused=true;},paused:true,currentTime:0});
-    return elements.get(id);
+      append(){},replaceChildren(){},setAttribute(){},addEventListener(){},pause(){this.paused=true;},paused:true,currentTime:0});
+    const item=elements.get(id);
+    if (!Object.getOwnPropertyDescriptor(item,'value').set) {
+      let value=item.value;
+      Object.defineProperty(item,'value',{get:()=>value,set:next=>{value=String(next);}});
+    }
+    return item;
   }
   for (const id of ['start','end']) for (const delta of [-5,-1,1,5]) {
     buttons.push({dataset:{time:id,delta:String(delta)},disabled:false});
   }
   const calls=[];
-  const context=vm.createContext({AbortSignal,document:{getElementById:element,querySelectorAll:selector=>selector.includes('[data-time]')?buttons:[]},
+  const context=vm.createContext({AbortSignal,document:{createElement:()=>({append(){},classList:{toggle(){}}}),getElementById:element,querySelectorAll:selector=>selector.includes('[data-time]')?buttons:[]},
     location:{search:''},URLSearchParams,fetch:async(url,options)=>{
       calls.push({url,options});
       const body=url==='/api/export'?{id:'exported'}:url==='/api/jobs/exported'?{status:'ready',url:'/media/done.mp4'}:{ffmpeg:true,ffprobe:true};
@@ -131,4 +136,43 @@ test('poll retries GET after transient failure but never resubmits export',async
   vm.runInContext(pollSource,context);
   assert.equal((await context.poll('id',message=>updates.push(message))).status,'ready');
   assert.equal(calls,3);assert.equal(updates.length,2);
+});
+
+test('YouTube import opens the same local editor with title and unlocked inputs',async()=>{
+  const {context:c,element:e}=editor();
+  e('youtubeUrl').value='https://youtu.be/BaW_jenozKc';
+  const calls=[];
+  c.request=async(url,options)=>{calls.push({url,body:JSON.parse(options.body)});return {id:'youtube-job'};};
+  c.poll=async()=>({status:'ready',duration:60,title:'Vídeo importado',segments:[],suggestions:[{start:0,end:45}],message:'Pronto'});
+  await c.importYoutube({preventDefault(){}});
+  assert.equal(calls[0].url,'/api/import/youtube');
+  assert.equal(calls[0].body.url,'https://youtu.be/BaW_jenozKc');
+  assert.equal(e('video').src,'/media/youtube-job/source.mp4');
+  assert.equal(e('editor').hidden,false);assert.match(e('videoTitle').textContent,/Vídeo importado/);
+  assert.equal(e('importYoutube').disabled,false);assert.equal(e('file').disabled,false);
+  e('start').value='1,5';e('start').oninput();assert.equal(c.values().start,1.5);
+});
+test('YouTube failure restores both import choices and displays useful error',async()=>{
+  const {context:c,element:e}=editor();e('youtubeUrl').value='https://invalid.test';
+  c.request=async()=>{throw Error('URL não suportada');};
+  await c.importYoutube({preventDefault(){}});
+  assert.equal(e('status').textContent,'URL não suportada');
+  assert.equal(e('file').disabled,false);assert.equal(e('importYoutube').disabled,false);
+});
+test('upload remains available and uses the original API and editor',async()=>{
+  const {context:c,element:e}=editor();let route;
+  c.request=async url=>{route=url;return {id:'uploaded'};};
+  c.poll=async()=>({status:'ready',duration:60,segments:[],suggestions:[{start:0,end:45}],message:'Pronto'});
+  await c.upload({name:'video.mp4',size:20});
+  assert.equal(route,'/api/upload');assert.equal(e('video').src,'/media/uploaded/source.mp4');
+  assert.equal(e('file').disabled,false);
+});
+test('seek controls navigate without modifying cut times or framing',()=>{
+  const {context:c,element:e}=editor('10','60');
+  e('video').currentTime=20;e('forward').onclick();assert.equal(e('video').currentTime,25);
+  e('backward').onclick();assert.equal(e('video').currentTime,20);
+  e('seek').value='390';e('seek').oninput();assert.equal(e('video').currentTime,390);
+  c.seekVideo(500);assert.equal(e('video').currentTime,400);
+  c.seekVideo(-1);assert.equal(e('video').currentTime,0);
+  assert.equal(e('start').value,'10');assert.equal(e('end').value,'60');assert.equal(e('framing').value,'80');
 });
