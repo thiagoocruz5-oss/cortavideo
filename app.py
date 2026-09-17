@@ -2,7 +2,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs
 import json
 import math
 import binaries
@@ -23,6 +23,11 @@ class LocalServer(ThreadingHTTPServer):
 
     def process_request(self, request, client_address):
         if not self.request_slots.acquire(blocking=False):
+            try:
+                request.settimeout(1)
+                request.sendall(b'HTTP/1.0 503 Service Unavailable\r\nRetry-After: 3\r\nContent-Length: 0\r\nConnection: close\r\n\r\n')
+            except OSError:
+                pass
             self.shutdown_request(request)
             return
         try:
@@ -49,6 +54,8 @@ JOBS = {}
 LOCK = threading.Lock()
 POOL = ThreadPoolExecutor(max_workers=1)
 HEAVY_SLOT = threading.BoundedSemaphore(1)
+FILE_LOCK = threading.RLock()
+ACTIVE_FILES = {}
 MAX_UPLOAD = 1024 * 1024 * 1024
 
 
@@ -94,7 +101,7 @@ def analyze(key):
     try:
         duration, audio = processing.probe(folder / 'source.mp4')
         update(key, status='transcribing', message='Transcrevendo em blocos com o modelo local…')
-        segments = processing.transcribe(folder / 'source.mp4') if audio else []
+        segments = processing.transcribe(folder / 'source.mp4', progress=lambda **state: update(key, **state)) if audio else []
         (folder / 'transcript.json').write_text(json.dumps(segments), encoding='utf-8')
         update(key, status='ready', message='Cortes prontos para revisar.' if segments else 'Sem fala detectada. Ajuste seu corte manualmente.',
                duration=duration, suggestions=processing.suggest(segments, duration))
@@ -106,7 +113,8 @@ def analyze(key):
 def render(key, parent, start, end, captions, position=0.5):
     try:
         name = processing.export(DATA / parent, load_segments(parent) if captions else [], start, end, captions, key, position)
-        update(key, status='ready', url=f'/media/{parent}/{name}')
+        url = f'/media/{parent}/{name}'
+        update(key, status='ready', url=url, download_url=url + '?download=1')
     except Exception as exc:
         update(key, status='error', message=str(exc))
 
@@ -126,8 +134,9 @@ def cleanup_expired():
         cutoff = time.time() - int(os.getenv('FILE_TTL_HOURS', '24')) * 3600
         for folder in DATA.iterdir():
             if folder.is_dir() and not folder.is_symlink() and len(folder.name) == 32 and all(c in '0123456789abcdef' for c in folder.name):
-                if folder.stat().st_mtime < cutoff:
-                    shutil.rmtree(folder, ignore_errors=True)
+                with FILE_LOCK:
+                    if not ACTIVE_FILES.get(folder) and folder.stat().st_mtime < cutoff:
+                        shutil.rmtree(folder, ignore_errors=True)
         with LOCK:
             for key, job in list(JOBS.items()):
                 if job.get('created', time.time()) < cutoff and job.get('status') in ('ready', 'error'):
@@ -173,7 +182,7 @@ class Handler(BaseHTTPRequestHandler):
                     os.utime(DATA / key, None)
                 except OSError:
                     return self.json({'message': 'Vídeo expirado. Envie novamente.'}, 410)
-            return self.json(job or {'message': 'Tarefa não encontrada.'}, 200 if job else 404)
+            return self.json(job or {'message': 'Tarefa não encontrada. O servidor pode ter reiniciado; envie o vídeo novamente.'}, 200 if job else 404)
         if path.startswith('/media/'):
             parts = path.split('/')
             if len(parts) != 4 or not all(c in '0123456789abcdef' for c in parts[2]) or len(parts[2]) != 32:
@@ -181,52 +190,97 @@ class Handler(BaseHTTPRequestHandler):
             name = parts[3]
             if name != 'source.mp4' and (len(name) != 36 or not name.endswith('.mp4') or not all(c in '0123456789abcdef' for c in name[:-4])):
                 return self.send_error(404)
-            return self.file(DATA / parts[2] / name, 'video/mp4')
+            return self.file(DATA / parts[2] / name, 'video/mp4', attachment=parse_qs(urlparse(self.path).query).get('download') == ['1'])
         files = {'/': ('index.html', 'text/html; charset=utf-8'), '/app.js': ('app.js', 'text/javascript'), '/style.css': ('style.css', 'text/css')}
         if path not in files:
             return self.send_error(404)
         name, mime = files[path]
         self.file(ROOT / 'static' / name, mime)
 
-    def file(self, path, mime):
-        if not path.is_file():
-            return self.send_error(404)
-        size = path.stat().st_size
-        start, end = 0, size-1
-        partial = self.headers.get('Range') if self.command != 'HEAD' else None
-        if partial:
-            try:
-                a, b = partial.removeprefix('bytes=').split('-')
-                start, end = (int(a), min(int(b), end) if b else end) if a else (max(0, size-int(b)), end)
-                if start < 0 or start > end:
-                    raise ValueError()
-            except ValueError:
-                self.send_response(416)
-                self.send_header('Content-Range', f'bytes */{size}')
-                self.end_headers()
-                return
-        self.send_response(206 if partial else 200)
-        self.send_header('Content-Type', mime)
-        self.send_header('Accept-Ranges', 'bytes')
-        self.send_header('Content-Length', str(end-start+1))
-        self.send_header('X-Content-Type-Options', 'nosniff')
-        if partial:
-            self.send_header('Content-Range', f'bytes {start}-{end}/{size}')
-        self.end_headers()
-        if self.command == 'HEAD':
-            return
+    def file(self, path, mime, attachment=False):
+        # Abre antes dos headers; limpeza e abertura usam o mesmo lock.
+        media = mime == 'video/mp4'
+        folder = path.parent
         try:
-            with path.open('rb') as f:
-                f.seek(start)
-                remaining = end-start+1
-                while remaining:
-                    chunk = f.read(min(1024*1024, remaining))
-                    if not chunk:
-                        break
-                    self.wfile.write(chunk)
-                    remaining -= len(chunk)
-        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
-            pass
+            with FILE_LOCK:
+                stream = path.open('rb')
+                if media:
+                    ACTIVE_FILES[folder] = ACTIVE_FILES.get(folder, 0) + 1
+        except OSError:
+            return self.json({'message': 'Arquivo indisponível ou expirado. Se o serviço reiniciou, envie o vídeo e exporte novamente.'}, 410 if media else 404)
+        sent = 0
+        try:
+            stat = os.fstat(stream.fileno())
+            size = stat.st_size
+            etag = f'"{stat.st_mtime_ns:x}-{size:x}"'
+            start, end = 0, size-1
+            partial = self.headers.get('Range') if self.command != 'HEAD' else None
+            if self.headers.get('If-Range') not in (None, etag):
+                partial = None
+            if partial:
+                try:
+                    if not partial.startswith('bytes=') or ',' in partial:
+                        raise ValueError()
+                    a, b = partial[6:].split('-')
+                    if not a:
+                        suffix = int(b)
+                        if suffix <= 0:
+                            raise ValueError()
+                        start = max(0, size-suffix)
+                    else:
+                        start = int(a)
+                        end = min(int(b), end) if b else end
+                    if start < 0 or start > end or start >= size:
+                        raise ValueError()
+                except ValueError:
+                    self.send_response(416)
+                    self.send_header('Content-Range', f'bytes */{size}')
+                    self.send_header('Content-Length', '0')
+                    self.end_headers()
+                    return
+            if media and not size:
+                return self.json({'message': 'O MP4 está vazio. Exporte novamente.'}, 409)
+            self.send_response(206 if partial else 200)
+            self.send_header('Content-Type', mime)
+            self.send_header('Accept-Ranges', 'bytes')
+            self.send_header('Content-Length', str(max(0, end-start+1)))
+            self.send_header('ETag', etag)
+            self.send_header('Cache-Control', 'private, no-cache')
+            self.send_header('X-Content-Type-Options', 'nosniff')
+            if attachment:
+                self.send_header('Content-Disposition', 'attachment; filename="cortavideo.mp4"')
+            if partial:
+                self.send_header('Content-Range', f'bytes {start}-{end}/{size}')
+            self.end_headers()
+            if self.command == 'HEAD':
+                return
+            stream.seek(start)
+            remaining = max(0, end-start+1)
+            # Buffers pequenos por conexão; downloads lentos não prendem RAM de vídeo.
+            self.connection.settimeout(120)
+            while remaining:
+                chunk = stream.read(min(256*1024, remaining))
+                if not chunk:
+                    raise OSError('MP4 truncado durante a transferência')
+                self.wfile.write(chunk)
+                remaining -= len(chunk)
+                sent += len(chunk)
+            if attachment:
+                self.log_message('DOWNLOAD complete bytes=%s range=%s pid=%s', sent, partial, os.getpid())
+        except (OSError, TimeoutError) as exc:
+            self.close_connection = True
+            self.log_message('TRANSFER interrupted bytes=%s pid=%s reason=%s', sent, os.getpid(), exc)
+        finally:
+            stream.close()
+            if media:
+                with FILE_LOCK:
+                    ACTIVE_FILES[folder] -= 1
+                    if not ACTIVE_FILES[folder]:
+                        ACTIVE_FILES.pop(folder)
+                    try:
+                        os.utime(folder, None)
+                    except OSError:
+                        pass
 
     def do_POST(self):
         # Evita requisições de outras páginas para o servidor local.
@@ -314,8 +368,9 @@ def server_address():
 if __name__ == '__main__':
     host, port = server_address()
     server = LocalServer((host, port), Handler)
-    print(f'CortaVideo: http://{host}:{port}', flush=True)
+    print(f'CortaVideo: http://{host}:{port} pid={os.getpid()} started={time.time()}', flush=True)
     def terminate(signum, frame):
+        print(f'SHUTDOWN signal={signum} pid={os.getpid()}', flush=True)
         stop_all()
         raise SystemExit(0)
     signal.signal(signal.SIGTERM, terminate)

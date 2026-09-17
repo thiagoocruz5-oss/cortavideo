@@ -6,23 +6,41 @@ function status(message, error = false) { $('status').hidden = false; $('status'
 async function request(url, options) {
   let response, body;
   try {
-    response = await fetch(url, options);
+    response = await fetch(url, {...options, signal: AbortSignal.timeout(url === '/api/upload' ? 600000 : 30000)});
     body = await response.text();
   } catch {
-    throw new Error('A conexão com o servidor foi interrompida. Ele pode estar reiniciando. Aguarde e tente novamente.');
+    throw Object.assign(new Error('A conexão com o servidor foi interrompida. Ele pode estar reiniciando. Aguarde e tente novamente.'), {retryable:true});
   }
   let data;
   try { data = JSON.parse(body); } catch {
-    throw new Error(`O servidor retornou uma resposta vazia ou inválida (HTTP ${response.status}). Ele pode estar reiniciando por falta de memória. Aguarde e tente novamente.`);
+    throw Object.assign(new Error(`O servidor retornou uma resposta vazia ou inválida (HTTP ${response.status}). Ele pode estar reiniciando. Aguarde e tente novamente.`), {retryable:response.status >= 500});
   }
   if (!data || typeof data !== 'object' || Array.isArray(data)) {
     throw new Error('Resposta inesperada do servidor. Aguarde e tente novamente.');
   }
-  if (!response.ok) throw new Error(data.message || `Não foi possível concluir (HTTP ${response.status}).`);
+  if (!response.ok) throw Object.assign(new Error(data.message || `Não foi possível concluir (HTTP ${response.status}).`), {retryable:response.status >= 500});
   return data;
 }
 
-async function poll(id, notify) { for (;;) { const result = await request(`/api/jobs/${id}`); if (result.status === 'error') throw new Error(result.message); if (result.status === 'ready') return result; notify(result.message); await new Promise(r => setTimeout(r, 1800)); } }
+async function poll(id, notify) {
+  let failures = 0;
+  for (;;) {
+    let result;
+    try {
+      result = await request(`/api/jobs/${id}`);
+      failures = 0;
+    } catch(error) {
+      if (!error.retryable || ++failures > 3) throw error;
+      notify(`Conexão interrompida. Tentando consultar o progresso (${failures}/3)…`);
+      await new Promise(resolve => setTimeout(resolve, 3000));
+      continue;
+    }
+    if (result.status === 'error') throw new Error(result.message);
+    if (result.status === 'ready') return result;
+    notify(result.message);
+    await new Promise(resolve => setTimeout(resolve, 1800));
+  }
+}
 function clock(t) { return `${Math.floor(t / 60).toString().padStart(2, '0')}:${Math.floor(t % 60).toString().padStart(2, '0')}`; }
 // Não reformata durante a digitação: apagar ou escrever uma vírgula é transitório.
 function parseTime(text) {
@@ -97,7 +115,7 @@ $('video').ontimeupdate = () => { caption(); if (Number.isFinite(values().end) &
 $('video').onpause = () => { $('play').textContent = '▶ Reproduzir trecho'; };
 $('play').onclick = async () => { if (!$('video').paused) return $('video').pause(); const {start,end} = values(); if (!timeState(start, end, job.duration).inside) return; if ($('video').currentTime < start || $('video').currentTime >= end - .1) $('video').currentTime = start; try { await $('video').play(); $('play').textContent = 'Ⅱ Pausar'; } catch { status('O navegador não reproduz este codec. A exportação MP4 ainda pode funcionar.', true); } };
 $('newVideo').onclick = () => { $('video').pause(); $('editor').hidden = true; $('uploadSection').hidden = false; $('status').hidden = true; $('step2').classList.remove('active'); $('step3').classList.remove('active'); };
-$('export').onclick = async () => { if (!validate()) return; exporting = true; validate(); for (const id of ['start','end','captions','framing']) $(id).disabled = true; document.querySelectorAll('.suggestion, [data-time]').forEach(el => el.disabled = true); $('newVideo').disabled = true; $('download').hidden = true; $('finalPreview').hidden = true; $('finalVideo').pause(); $('export').textContent = 'Exportando…'; status('Preparando MP4 vertical…'); try { const result = await request('/api/export', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:current,...values(),captions:$('captions').checked,position:Number($('framing').value)/100})}); const finished = await poll(result.id, message => status(message)); $('download').href = finished.url; $('finalVideo').src = finished.url; $('finalPreview').hidden = false; $('download').hidden = false; $('step3').classList.add('active'); status('Corte pronto! Baixe o MP4 para publicar.'); } catch(error) { status(error.message, true); } finally { exporting = false; for (const id of ['start','end','framing']) $(id).disabled = false; $('captions').disabled = !job.segments.length; document.querySelectorAll('.suggestion, [data-time]').forEach(el => el.disabled = false); $('export').textContent = 'Exportar corte ↗'; $('newVideo').disabled = false; validate(); } };
+$('export').onclick = async () => { if (!validate()) return; exporting = true; validate(); for (const id of ['start','end','captions','framing']) $(id).disabled = true; document.querySelectorAll('.suggestion, [data-time]').forEach(el => el.disabled = true); $('newVideo').disabled = true; $('download').hidden = true; $('finalPreview').hidden = true; $('finalVideo').pause(); $('export').textContent = 'Exportando…'; status('Preparando MP4 vertical…'); try { const result = await request('/api/export', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:current,...values(),captions:$('captions').checked,position:Number($('framing').value)/100})}); const finished = await poll(result.id, message => status(message)); $('download').href = finished.download_url || finished.url + '?download=1'; $('finalVideo').src = finished.url; $('finalPreview').hidden = false; $('download').hidden = false; $('step3').classList.add('active'); status('Corte pronto! Baixe o MP4 para publicar.'); } catch(error) { status(error.message, true); } finally { exporting = false; for (const id of ['start','end','framing']) $(id).disabled = false; $('captions').disabled = !job.segments.length; document.querySelectorAll('.suggestion, [data-time]').forEach(el => el.disabled = false); $('export').textContent = 'Exportar corte ↗'; $('newVideo').disabled = false; validate(); } };
 request('/api/health').then(h => { if (!h.ffmpeg || !h.ffprobe) status('Para processar vídeos, instale FFmpeg e ffprobe. Veja as instruções no README.', true); }).catch(() => status('Não foi possível conectar ao servidor local.', true));
 const resumeId = new URLSearchParams(location.search).get('job');
 if (resumeId && /^[a-f0-9]{32}$/.test(resumeId)) {
@@ -135,3 +153,33 @@ $('video').addEventListener('loadedmetadata', () => {
     ? 'Este vídeo não tem sobra lateral; o enquadramento horizontal permanece fixo.'
     : 'A posição será aplicada ao MP4.';
 });
+
+// O navegador grava em disco e pode retomar via Range; não cria Blob do MP4 na RAM.
+$('download').onclick = async event => {
+  event.preventDefault();
+  const link = $('download');
+  if (link.dataset.busy === '1') return;
+  const url = link.href;
+  link.dataset.busy = '1';
+  link.textContent = 'Verificando vídeo…';
+  try {
+    const response = await fetch(url, {method:'HEAD', signal:AbortSignal.timeout(20000)});
+    if (response.status === 404 || response.status === 410) throw new Error('O arquivo expirou ou o serviço reiniciou. Envie o vídeo e exporte novamente.');
+    if (!response.ok || !response.headers.get('Content-Type')?.includes('video/mp4') || Number(response.headers.get('Content-Length')) <= 0) {
+      throw new Error('O MP4 está indisponível agora. Aguarde e tente baixar novamente.');
+    }
+    $('finalVideo').pause();
+    const native = document.createElement('a');
+    native.href = url;
+    native.download = 'cortavideo.mp4';
+    document.body.append(native);
+    native.click();
+    native.remove();
+    status('Download solicitado. Acompanhe nos downloads do navegador. Se a rede interromper, use Retomar ou clique em Baixar vídeo novamente.');
+  } catch(error) {
+    status(error.name === 'TimeoutError' || error.name === 'TypeError' ? 'Não foi possível conectar para baixar. Aguarde e tente novamente; o servidor pode estar reiniciando.' : error.message, true);
+  } finally {
+    link.dataset.busy = '0';
+    link.textContent = '↓ Baixar vídeo';
+  }
+};

@@ -6,7 +6,7 @@ const vm = require('node:vm');
 const source = fs.readFileSync(path.join(__dirname,'../static/app.js'),'utf8');
 const requestSource = source.slice(source.indexOf('async function request('),source.indexOf('async function poll'));
 function client(response) {
-  const context = vm.createContext({fetch:async()=>response});
+  const context = vm.createContext({AbortSignal,fetch:async()=>response});
   vm.runInContext(requestSource,context);
   return context.request;
 }
@@ -31,7 +31,7 @@ function editor(start='243,73', end='293,26') {
     buttons.push({dataset:{time:id,delta:String(delta)},disabled:false});
   }
   const calls=[];
-  const context=vm.createContext({document:{getElementById:element,querySelectorAll:selector=>selector.includes('[data-time]')?buttons:[]},
+  const context=vm.createContext({AbortSignal,document:{getElementById:element,querySelectorAll:selector=>selector.includes('[data-time]')?buttons:[]},
     location:{search:''},URLSearchParams,fetch:async(url,options)=>{
       calls.push({url,options});
       const body=url==='/api/export'?{id:'exported'}:url==='/api/jobs/exported'?{status:'ready',url:'/media/done.mp4'}:{ffmpeg:true,ffprobe:true};
@@ -93,4 +93,42 @@ test('export sends numeric edited times, captions and chosen framing; restores c
   assert.deepEqual(payload,{id:'source',start:243.73,end:293.26,captions:true,position:.8});
   assert.equal(e('finalVideo').src,'/media/done.mp4'); assert.equal(e('download').hidden,false);
   assert.ok(buttons.every(b=>!b.disabled)); assert.equal(e('start').disabled,false);
+});
+
+function downloadClient(response) {
+  const sourceHandler=source.slice(source.indexOf("$('download').onclick ="));
+  const link={href:'/media/final.mp4?download=1',dataset:{},textContent:''};
+  const clicks=[];const messages=[];
+  const native={click(){clicks.push(this.href);},remove(){}};
+  const context=vm.createContext({AbortSignal,fetch:async()=>{if(response instanceof Error)throw response;return response;},
+    $:id=>id==='download'?link:{pause(){}},status:(text,error)=>messages.push({text,error}),
+    document:{body:{append(){}},createElement:()=>native}});
+  vm.runInContext(sourceHandler,context);
+  return {link,clicks,messages};
+}
+test('download uses HEAD then native disk download without buffering MP4',async()=>{
+  const {link,clicks,messages}=downloadClient({ok:true,status:200,headers:{get:key=>key==='Content-Type'?'video/mp4':'12345'}});
+  await link.onclick({preventDefault(){}});
+  assert.deepEqual(clicks,['/media/final.mp4?download=1']);
+  assert.equal(link.textContent,'↓ Baixar vídeo');assert.match(messages[0].text,/Retomar/);
+});
+for(const response of [{ok:false,status:410},{ok:false,status:503},new TypeError('network'),Object.assign(new Error('timeout'),{name:'TimeoutError'})]) {
+  test(`download failure ${response.status||response.name} is visible and retryable by user`,async()=>{
+    const {link,clicks,messages}=downloadClient(response);
+    await link.onclick({preventDefault(){}});
+    assert.equal(clicks.length,0);assert.equal(messages[0].error,true);
+    assert.equal(link.dataset.busy,'0');assert.equal(link.textContent,'↓ Baixar vídeo');
+  });
+}
+test('poll retries GET after transient failure but never resubmits export',async()=>{
+  const pollSource=source.slice(source.indexOf('async function poll('),source.indexOf('function clock('));
+  let calls=0;const updates=[];
+  const context=vm.createContext({request:async url=>{
+    assert.equal(url,'/api/jobs/id');
+    if(++calls<3)throw Object.assign(new Error('offline'),{retryable:true});
+    return {status:'ready'};
+  },setTimeout:fn=>fn()});
+  vm.runInContext(pollSource,context);
+  assert.equal((await context.poll('id',message=>updates.push(message))).status,'ready');
+  assert.equal(calls,3);assert.equal(updates.length,2);
 });

@@ -42,16 +42,30 @@ def scratch_directory(parent):
         shutil.rmtree(folder)
 
 
-def transcribe(path):
+def transcribe(path, progress=None):
     path = Path(path).resolve()
     # FFmpeg termina ANTES do carregamento do modelo, evitando somar os picos.
     with scratch_directory(path.parent) as scratch:
         wav = Path(scratch) / 'audio.wav'
         result = Path(scratch) / 'transcript.json'
+        state = Path(scratch) / 'progress.json'
+        last_progress = None
+        def report():
+            nonlocal last_progress
+            if progress and state.is_file():
+                try:
+                    value = json.loads(state.read_text(encoding='utf-8'))
+                except (OSError, ValueError):
+                    return
+                if value != last_progress:
+                    progress(**value)
+                    last_progress = value
+        if progress:
+            progress(message='Extraindo áudio mono/16 kHz…')
         run(['ffmpeg', '-y', '-v', 'error', '-threads', '1', '-i', str(path),
              '-vn', '-sn', '-dn', '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', str(wav)])
         run_process([sys.executable, str(Path(__file__).with_name('transcription_worker.py')),
-                     str(wav), str(result)])
+                     str(wav), str(result), str(state)], on_tick=report)
         return json.loads(result.read_text(encoding='utf-8'))
 
 

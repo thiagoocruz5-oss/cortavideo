@@ -4,6 +4,7 @@ import subprocess
 import tempfile
 import threading
 import os
+import time
 
 ACTIVE = set()
 LOCK = threading.Lock()
@@ -37,7 +38,7 @@ def stop_all():
 atexit.register(stop_all)
 
 
-def run_process(args, cwd=None, timeout=7200):
+def run_process(args, cwd=None, timeout=7200, on_tick=None):
     # Nenhum pipe cresce na RAM. Todos os processos iniciados aqui são folhas.
     with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
         process = subprocess.Popen(args, cwd=cwd, stdout=stdout, stderr=stderr,
@@ -46,7 +47,21 @@ def run_process(args, cwd=None, timeout=7200):
             ACTIVE.add(process)
         try:
             try:
-                code = process.wait(timeout=timeout)
+                if on_tick is None:
+                    code = process.wait(timeout=timeout)
+                else:
+                    deadline = time.monotonic() + timeout
+                    while True:
+                        on_tick()
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise subprocess.TimeoutExpired(args[0], timeout)
+                        try:
+                            code = process.wait(timeout=min(1, remaining))
+                            on_tick()
+                            break
+                        except subprocess.TimeoutExpired:
+                            continue
             except subprocess.TimeoutExpired as exc:
                 raise RuntimeError('O processamento excedeu o tempo limite. Tente um vídeo menor.') from exc
             if code:

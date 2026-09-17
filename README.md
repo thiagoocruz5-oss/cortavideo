@@ -23,13 +23,13 @@ O upload já era gravado em blocos de 1 MiB. O principal risco identificado esta
 Agora:
 
 - FFmpeg extrai áudio para um arquivo temporário em disco e termina antes de carregar o modelo.
-- Um processo separado transcreve blocos de até 32 segundos, com sobreposição e timestamps globais. Ao terminar, libera a memória do modelo. A divisão pode alterar palavras nas fronteiras dos blocos.
+- Um processo separado transcreve blocos de até 60 segundos no modo de pouca memória (32 segundos no modo local padrão), com sobreposição e timestamps globais. Ao terminar, libera a memória do modelo. A divisão pode alterar palavras nas fronteiras dos blocos.
 - Upload/análise/exportação compartilham uma única vaga de processamento; novas operações recebem uma mensagem para tentar depois quando ela está ocupada.
 - FFmpeg usa uma thread por decodificador, filtro e codificador, sem lookahead na exportação. Logs ficam em disco; timeout e encerramento do servidor interrompem os subprocessos.
 - Transcrições ficam em disco. Áudio temporário, legendas intermediárias e exports incompletos são removidos inclusive em falhas tratáveis. Arquivos de entrada e MP4 finais permanecem disponíveis e recebem limpeza por expiração (24 horas por padrão, configurável por `FILE_TTL_HOURS`). Um encerramento forçado pelo sistema pode impedir a limpeza imediata.
 - O navegador trata respostas vazias, inválidas e falhas de conexão com uma mensagem compreensível.
 
-**Validação:** 51 testes Python (incluindo FFmpeg real) e 14 testes JavaScript passaram. Um fluxo real passou por upload, transcrição `tiny`, legendas, enquadramento à direita, exportação 720×1280, HEAD, download parcial e limpeza temporária. Em uma transcrição real de 90 segundos, o processo do modelo teve pico residente de **269 MiB no Windows**. Essa medida não inclui todo o serviço e não certifica consumo abaixo de 512 MB no Linux/Render. Vídeos de resolução muito alta e buffers nativos ainda podem exceder esse limite; confirme o consumo no novo deploy. Use somente uma instância do servidor por serviço.
+**Validação:** 61 testes Python (incluindo FFmpeg real) e 20 testes JavaScript passaram. Um fluxo real passou por upload, transcrição `tiny`, legendas, enquadramento à direita, exportação 720×1280, HEAD, download parcial e limpeza temporária. Em uma transcrição real de 90 segundos, o processo do modelo teve pico residente de **269 MiB no Windows**. Essa medida não inclui todo o serviço e não certifica consumo abaixo de 512 MB no Linux/Render. Vídeos de resolução muito alta e buffers nativos ainda podem exceder esse limite; confirme o consumo no novo deploy. Use somente uma instância do servidor por serviço.
 
 O disco do Render gratuito é temporário: reinícios podem perder uploads e exports. O modelo preparado no build acompanha o artefato. Referência: [limitações gratuitas do Render](https://render.com/docs/free).
 
@@ -166,3 +166,30 @@ node tests/test_client.cjs
 ```
 
 Sem a variável, o teste real de mídia é pulado. Ele verifica os três enquadramentos (esquerda, centro e direita), áudio, legendas gravadas, duração, resolução e remoção de legendas temporárias. Os testes de interface cobrem digitação, separadores decimais, limites, botões, bloqueio durante exportação e o envio dos tempos/enquadramento para a API.
+
+## Transcrição com progresso e download resiliente
+
+No modo `LOW_MEMORY_MODE=1` (padrão no Render), a leitura é de 56 segundos úteis por bloco, com até dois segundos de contexto de cada lado: **máximo de 60 segundos de áudio na RAM**. Antes eram 28 segundos úteis/32 com contexto. Isso reduz o número de chamadas, sobreposição e preparação de recursos por chamada. Não muda a janela interna de 30 segundos do Whisper. O áudio continua extraído uma única vez para WAV mono/16 kHz/int16 em disco. O modelo continua carregado uma única vez no processo isolado por vídeo, que termina antes da exportação; não há processo por bloco nem processamento em lote paralelo.
+
+O perfil Render usa `beam_size=1`, `temperature=0` e `best_of=1`. Antes, mesmo com beam 1, a lista padrão de temperaturas podia executar novas tentativas e gerar cinco candidatos em trechos difíceis. A nova configuração elimina essas tentativas: melhora velocidade, mas pode reduzir a qualidade em fala difícil/ruidosa. VAD, timestamps por palavra, contexto e eliminação da sobreposição são mantidos. O Windows sem modo de pouca memória mantém o perfil anterior. O modelo `tiny`/int8 e uma thread permanecem; não use vários workers no Render gratuito.
+
+O worker publica um pequeno arquivo JSON de progresso por bloco, substituído atomicamente. O servidor verifica mudanças uma vez por segundo, sem importar Whisper, e a interface mostra `Transcrevendo bloco 3 de 10`. O número concluído só avança ao finalizar um bloco. Extração e carregamento do modelo têm mensagens próprias; um bloco em andamento pode demorar na CPU compartilhada.
+
+### Download
+
+O resultado da API mantém `url` para prévia e acrescenta `download_url` com `?download=1`. O botão **Baixar vídeo** verifica o MP4 por HEAD e inicia download nativo, sem carregar o arquivo em um Blob no navegador. O endpoint usa `Content-Disposition: attachment`, tamanho exato, ETag, Range e If-Range para retomada. GET da prévia continua sem disposição de anexo.
+
+O arquivo é aberto antes de enviar headers, transferido em buffers de 256 KiB e protegido contra limpeza enquanto a resposta está ativa. Ao terminar ou interromper, sua retenção é renovada. Saturação das oito conexões passa a responder 503/Retry-After em vez de encerrar silenciosamente. Erros depois dos headers são registrados, sem tentar enviar JSON dentro do MP4. A consulta do progresso repete somente GETs em falhas transitórias, até três vezes; POSTs não são repetidos automaticamente.
+
+Um download nativo pode falhar depois da verificação HEAD; a página não tem acesso ao resultado final do gerenciador de downloads do Chrome. Nesse caso, use **Retomar** no navegador ou Baixar vídeo novamente. Isso funciona enquanto o mesmo arquivo existe. Se houver reinício/redeploy, o disco temporário do Render pode desaparecer e será necessário reenviar/exportar. Nenhuma correção HTTP consegue recuperar um arquivo perdido sem armazenamento persistente externo.
+
+Para diagnóstico, os logs agora registram `DOWNLOAD complete`, `TRANSFER interrupted` (bytes enviados e motivo), PID/início do servidor e `SHUTDOWN` quando há SIGTERM. Compare com eventos de memória/reinício do Render. Um encerramento forçado por falta de memória pode impedir qualquer log final. O erro “Rede desconectada” sozinho não prova OOM nem exclusão do arquivo. Foram identificados riscos no código, mas a causa da ocorrência anterior depende desses registros.
+
+Referências: [opções do faster-whisper](https://github.com/SYSTRAN/faster-whisper/blob/master/faster_whisper/transcribe.py), [recursos do Render](https://render.com/docs/compute-plans) e [disco temporário/reinícios](https://render.com/docs/faq).
+
+
+### Medição desta otimização
+
+Em duas execuções sequenciais com o mesmo áudio de fala de 90 segundos, `tiny`/int8, no Windows: antes **61,13 s / 58,33 s**, depois **13,00 s / 13,03 s**. Pico residente do worker: antes **268,1–268,8 MiB**, depois **243,0–243,1 MiB**. Ambos produziram 181 palavras nessa amostra; isso não substitui avaliação de precisão com outros áudios. O ganho varia com fala, ruído e CPU. Não é medição do serviço completo no Render nem garantia absoluta de 512 MB.
+
+Validação atual: 61 testes Python com o teste de mídia habilitado e 20 JavaScript, além de upload/transcrição/exportação/download HTTP reais. Foram testados progresso por bloco, carga única do modelo, limite da janela, download completo e parcial, cliente desconectado seguido de retomada, proteção contra limpeza, arquivo ausente, saturação e falhas de rede/timeout na interface.
