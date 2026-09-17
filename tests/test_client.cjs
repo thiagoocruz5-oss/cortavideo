@@ -16,3 +16,81 @@ for (const body of ['', '<html>Bad gateway</html>', 'null']) {
 }
 test('busy response keeps useful message', async()=>assert.rejects(client({ok:false,status:429,text:async()=>' {"message":"Aguarde"} '})('/'), /Aguarde/));
 test('connection interruption handled', async()=>assert.rejects(client({text:async()=>{throw Error('network');}})('/'), /conexão/));
+
+// Exercita os handlers completos com elementos de DOM controlados.
+function editor(start='243,73', end='293,26') {
+  const elements = new Map();
+  const buttons = [];
+  function element(id) {
+    if (!elements.has(id)) elements.set(id, {value:'', textContent:'', hidden:false, disabled:false,
+      classList:{add(){},remove(){},toggle(){}},style:{}, dataset:{},
+      setAttribute(){},addEventListener(){},pause(){this.paused=true;},paused:true,currentTime:0});
+    return elements.get(id);
+  }
+  for (const id of ['start','end']) for (const delta of [-5,-1,1,5]) {
+    buttons.push({dataset:{time:id,delta:String(delta)},disabled:false});
+  }
+  const calls=[];
+  const context=vm.createContext({document:{getElementById:element,querySelectorAll:selector=>selector.includes('[data-time]')?buttons:[]},
+    location:{search:''},URLSearchParams,fetch:async(url,options)=>{
+      calls.push({url,options});
+      const body=url==='/api/export'?{id:'exported'}:url==='/api/jobs/exported'?{status:'ready',url:'/media/done.mp4'}:{ffmpeg:true,ffprobe:true};
+      return {ok:true,status:200,text:async()=>JSON.stringify(body)};
+    }});
+  vm.runInContext(source,context);
+  vm.runInContext('job={duration:400,segments:[{}]}; current="source";',context);
+  element('start').value=start; element('end').value=end; element('framing').value='80'; element('captions').checked=true;
+  return {context,element,buttons,calls};
+}
+test('manual typing accepts comma and dot without rewriting the field',()=>{
+  const {context:c,element:e}=editor();
+  e('start').oninput(); assert.equal(e('start').value,'243,73'); assert.equal(e('video').currentTime,243.73);
+  e('start').value='244.25'; e('start').oninput(); assert.equal(c.values().start,244.25);
+  assert.match(e('duration').textContent,/49,01/); assert.equal(e('export').disabled,false);
+});
+test('empty and unfinished invalid text never seeks to zero or enables export',()=>{
+  const {element:e}=editor(); e('video').currentTime=250;
+  for(const text of ['', '-', ',', '1,2.3','Infinity','NaN','1e3']) {
+    e('start').value=text; e('start').oninput(); assert.equal(e('start').value,text);
+    assert.equal(e('video').currentTime,250); assert.equal(e('export').disabled,true);
+  }
+  e('start').value='243,'; e('start').oninput(); assert.equal(e('start').value,'243,');
+  e('start').value='243,8'; e('start').oninput(); assert.equal(e('video').currentTime,243.8);
+});
+test('end edits update duration and show frame just before cut end',()=>{
+  const {element:e}=editor('10','60'); e('end').value='59,5'; e('end').oninput();
+  assert.equal(e('video').currentTime,59.45); assert.match(e('duration').textContent,/49,50/);
+  assert.equal(e('download').hidden,true); assert.equal(e('finalPreview').hidden,true);
+});
+test('invalid boundaries and existing 30–60 second export rule are enforced',()=>{
+  const {context:c}=editor();
+  for(const [a,b] of [[-1,40],[350,401],[50,50],[51,50],[0,29.99],[0,60.01]]) assert.equal(c.timeState(a,b,400).valid,false);
+  for(const [a,b] of [[0,30],[0,60],[350,400]]) assert.equal(c.timeState(a,b,400).valid,true);
+});
+test('all quick buttons use parsed decimals and update preview',()=>{
+  for(const id of ['start','end']) for(const delta of [-5,-1,1,5]) {
+    const {element:e,buttons}=editor('20,25','65,25');
+    buttons.find(b=>b.dataset.time===id&&Number(b.dataset.delta)===delta).onclick();
+    assert.equal(e(id).value,String((id==='start'?20.25:65.25)+delta).replace('.',','));
+    assert.equal(e('export').disabled,false);
+  }
+});
+test('quick controls clamp to video boundaries and cannot cross the other endpoint',()=>{
+  const {context:c,element:e}=editor('0','400');
+  c.stepTime('start',-5); assert.equal(c.values().start,0);
+  c.stepTime('end',5); assert.equal(c.values().end,400);
+  e('start').value='399'; c.stepTime('start',5); assert.equal(c.values().start,399.99);
+  c.stepTime('end',-5); assert.ok(c.values().end>c.values().start);
+});
+test('quick controls cannot modify an export in progress',()=>{
+  const {context:c,element:e}=editor(); vm.runInContext('exporting=true',c);
+  c.stepTime('start',5); assert.equal(e('start').value,'243,73');
+});
+test('export sends numeric edited times, captions and chosen framing; restores controls',async()=>{
+  const {element:e,calls,buttons}=editor();
+  await e('export').onclick();
+  const payload=JSON.parse(calls.find(call=>call.url==='/api/export').options.body);
+  assert.deepEqual(payload,{id:'source',start:243.73,end:293.26,captions:true,position:.8});
+  assert.equal(e('finalVideo').src,'/media/done.mp4'); assert.equal(e('download').hidden,false);
+  assert.ok(buttons.every(b=>!b.disabled)); assert.equal(e('start').disabled,false);
+});

@@ -29,7 +29,7 @@ Agora:
 - Transcrições ficam em disco. Áudio temporário, legendas intermediárias e exports incompletos são removidos inclusive em falhas tratáveis. Arquivos de entrada e MP4 finais permanecem disponíveis e recebem limpeza por expiração (24 horas por padrão, configurável por `FILE_TTL_HOURS`). Um encerramento forçado pelo sistema pode impedir a limpeza imediata.
 - O navegador trata respostas vazias, inválidas e falhas de conexão com uma mensagem compreensível.
 
-**Validação:** 45 testes Python e 6 testes JavaScript passaram. Um fluxo real passou por upload, transcrição `tiny`, legendas, enquadramento à direita, exportação 720×1280, HEAD, download parcial e limpeza temporária. Em uma transcrição real de 90 segundos, o processo do modelo teve pico residente de **269 MiB no Windows**. Essa medida não inclui todo o serviço e não certifica consumo abaixo de 512 MB no Linux/Render. Vídeos de resolução muito alta e buffers nativos ainda podem exceder esse limite; confirme o consumo no novo deploy. Use somente uma instância do servidor por serviço.
+**Validação:** 51 testes Python (incluindo FFmpeg real) e 14 testes JavaScript passaram. Um fluxo real passou por upload, transcrição `tiny`, legendas, enquadramento à direita, exportação 720×1280, HEAD, download parcial e limpeza temporária. Em uma transcrição real de 90 segundos, o processo do modelo teve pico residente de **269 MiB no Windows**. Essa medida não inclui todo o serviço e não certifica consumo abaixo de 512 MB no Linux/Render. Vídeos de resolução muito alta e buffers nativos ainda podem exceder esse limite; confirme o consumo no novo deploy. Use somente uma instância do servidor por serviço.
 
 O disco do Render gratuito é temporário: reinícios podem perder uploads e exports. O modelo preparado no build acompanha o artefato. Referência: [limitações gratuitas do Render](https://render.com/docs/free).
 
@@ -140,3 +140,29 @@ Esta alteração configura apenas a porta e o endereço de escuta; não constitu
 ### Proteção de origem
 
 POSTs com `Origin` aceitam explicitamente `https://cortavideo.onrender.com`. Acesso HTTP local permite `127.0.0.1` e `localhost` quando o Host também é local e a porta coincide. Outros domínios, origem `null`, sufixos parecidos e portas diferentes são bloqueados. Cabeçalhos `X-Forwarded-*` não ampliam essa permissão. Clientes sem Origin mantêm a compatibilidade anterior; essa verificação não substitui autenticação.
+
+## Exportação mais rápida e ajuste de tempos
+
+A exportação usa `libx264 -preset veryfast -crf 22 -tune zerolatency`, mantendo uma thread de decodificação, filtro e codificação. O corte já usava busca antes da entrada (`-ss` antes de `-i`) e uma única codificação; essas características foram preservadas. Não há carregamento do modelo de transcrição na exportação. Resolução, áudio AAC, enquadramento e legendas ASS permanecem iguais. O preset pode mudar a compressão e o tamanho do arquivo dependendo do conteúdo.
+
+Comparação local no Windows, com vídeo sintético em movimento 1280×720/30 fps, corte de 50 segundos, saída 720×1280, áudio e legendas, uma execução sequencial por preset:
+
+| Preset | Tempo | Pico residente do FFmpeg | MP4 |
+| --- | ---: | ---: | ---: |
+| fast (anterior) | 43,59 s | 81,0 MiB | 34,41 MiB |
+| veryfast (adotado) | 17,00 s | 75,7 MiB | 33,13 MiB |
+| superfast | 13,49 s | 75,7 MiB | 40,35 MiB |
+
+Foi escolhido `veryfast` pelo equilíbrio entre velocidade e compressão. Esses números são uma comparação local, não uma previsão de tempo nem certificação de memória no Render. Fonte técnica: [opções de codificação e busca do FFmpeg](https://ffmpeg.org/ffmpeg-all.html).
+
+Os campos Início e Fim aceitam segundos com ponto ou vírgula e podem ficar vazios durante a digitação. O texto não é reescrito a cada tecla. Os botões −5s, −1s, +1s e +5s respeitam os limites do vídeo e a ordem do intervalo. Uma entrada manual inválida mostra uma mensagem e bloqueia a exportação. Permanece a regra de cortes de 30 a 60 segundos. A duração é recalculada imediatamente; editar Início mostra seu primeiro instante e editar Fim mostra o instante imediatamente anterior ao fim. Qualquer ajuste invalida o resultado anterior. Controles ficam bloqueados durante a exportação.
+
+Para incluir a validação real de FFmpeg na suíte (requer FFmpeg/ffprobe com libass), no PowerShell:
+
+```powershell
+$env:CORTAVIDEO_MEDIA_TESTS = '1'
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+node tests/test_client.cjs
+```
+
+Sem a variável, o teste real de mídia é pulado. Ele verifica os três enquadramentos (esquerda, centro e direita), áudio, legendas gravadas, duração, resolução e remoção de legendas temporárias. Os testes de interface cobrem digitação, separadores decimais, limites, botões, bloqueio durante exportação e o envio dos tempos/enquadramento para a API.

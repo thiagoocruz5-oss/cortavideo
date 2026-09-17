@@ -165,7 +165,8 @@ def export(folder, segments, start, end, captions, export_id, position=0.5):
         run(['ffmpeg', '-y', '-v', 'error', '-threads', '1', '-filter_threads', '1',
              '-ss', str(start), '-i', 'source.mp4', '-t', str(end-start),
              '-map', '0:v:0', '-map', '0:a:0?', '-vf', filters, '-c:v', 'libx264',
-             '-threads', '1', '-preset', 'fast', '-tune', 'zerolatency',
+             # veryfast reduz custo de CPU; zerolatency evita buffers de lookahead.
+             '-threads', '1', '-preset', 'veryfast', '-tune', 'zerolatency',
              '-crf', '22', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k',
              '-movflags', '+faststart', output], cwd=folder)
         return output
